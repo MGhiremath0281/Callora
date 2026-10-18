@@ -1,4 +1,21 @@
 ﻿services:
+  db:
+    image: postgres:16-alpine
+    container_name: callora-db
+    environment:
+      POSTGRES_USER: callora
+      POSTGRES_PASSWORD: callora
+      POSTGRES_DB: callora
+    ports:
+      - "5433:5432"
+    volumes:
+      - callora_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U callora -d callora"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   backend:
     build:
       context: ./backend
@@ -6,6 +23,19 @@
     container_name: callora-backend
     ports:
       - "8001:8000"
+    environment:
+      CALLORA_DATABASE_URL: postgresql+psycopg2://callora:callora@db:5432/callora
+      CALLORA_API_KEYS: "biz_001:dev-key-biz-001"
+      # CALLORA_EVENT_WEBHOOK_URL: http://events-consumer:9000/webhook
+      CALLORA_LOG_LEVEL: INFO
     volumes:
       - ./backend/app:/app/app
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+      - ./backend/alembic:/app/alembic
+      - ./backend/alembic.ini:/app/alembic.ini
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  callora_pgdata:
