@@ -53,6 +53,12 @@ class Settings(BaseSettings):
     # When true, unhandled exceptions are re-raised instead of being masked
     # by the generic 500 handler. Useful in tests and local debugging.
     debug: bool = False
+    
+    
+    # --- CRM Synchronization -------------------------------------------
+    crm_base_url: str | None = None
+    crm_api_key: str | None = None
+    crm_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
 
     # --- Derived helpers -----------------------------------------------
 
