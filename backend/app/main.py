@@ -13,6 +13,7 @@ from app.api import leads as leads_api
 from app.config import get_settings
 from app.errors import register_exception_handlers
 from app.logging_config import setup_logging
+from app.modules.crm_sync import router as crm_sync_api
 
 API_PREFIX = "/api/v1"
 
@@ -40,6 +41,7 @@ register_exception_handlers(app)
 # Versioned API surface.
 app.include_router(leads_api.router, prefix=API_PREFIX)
 app.include_router(imports_api.router, prefix=API_PREFIX)
+app.include_router(crm_sync_api.router, prefix=API_PREFIX)
 
 # Unversioned aliases so the documented endpoints (/leads, /imports/...)
 # work directly as specified in the Module 1 API contract.
