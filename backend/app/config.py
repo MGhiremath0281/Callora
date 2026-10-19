@@ -56,9 +56,30 @@ class Settings(BaseSettings):
     
     
     # --- CRM Synchronization -------------------------------------------
+    # Base URL of the external UrbanNestCRM service. Must be an absolute
+    # http(s) URL reachable from wherever this app runs. Inside Docker
+    # that means a hostname resolvable from the backend container — a
+    # compose service name on a shared network (e.g.
+    # http://urbannestcrm:9000) or host.docker.internal when the CRM runs
+    # on the host. "localhost:9000" inside the container is the container
+    # itself and will never reach the CRM. See docker-compose.yml and
+    # .env.example.
     crm_base_url: str | None = None
     crm_api_key: str | None = None
     crm_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
+    # The "business_name" value UrbanNestCRM's POST /contacts schema
+    # requires; identifies whose leads are being synchronized.
+    crm_business_name: str = "UrbanNest Realty"
+    # Development escape hatch: allow loopback/private CRM destinations
+    # (e.g. a fake CRM on localhost). Must remain false in production —
+    # connection URLs are SSRF-validated against private ranges.
+    crm_allow_private_urls: bool = False
+    # Explicit, development-only allowlist of non-public CRM destinations.
+    # Comma-separated `host:port` entries; empty by default so production
+    # still rejects private/loopback/link-local destinations. Example for a
+    # fake CRM on the Docker host:
+    #   CALLORA_CRM_DEV_ALLOWED_DESTINATIONS=host.docker.internal:9000
+    crm_dev_allowed_destinations: str = ""
 
     # --- Derived helpers -----------------------------------------------
 
@@ -68,6 +89,22 @@ class Settings(BaseSettings):
         if not v:
             raise ValueError("database_url must not be empty")
         return v
+
+    @field_validator("crm_base_url")
+    @classmethod
+    def _validate_crm_base_url(cls, v: Optional[str]) -> Optional[str]:
+        """Fail fast on CRM base URLs that could never be reached."""
+        if v is None or not v.strip():
+            return None
+        cleaned = v.strip().rstrip("/")
+        if not cleaned.lower().startswith(("http://", "https://")):
+            raise ValueError(
+                "crm_base_url must be an absolute http(s) URL reachable from "
+                "the backend, e.g. http://urbannestcrm:9000 (container "
+                "network) or http://host.docker.internal:9000 (CRM on host); "
+                f"got {v!r}"
+            )
+        return cleaned
 
     @property
     def api_key_map(self) -> Dict[str, str]:
