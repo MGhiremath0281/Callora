@@ -52,7 +52,7 @@ class TestBadFiles:
     def test_invalid_mappings_json_rejected(self, client):
         csv_bytes = build_csv(REALESTATE_HEADER, REALESTATE_ROWS[:1])
         response = client.post(
-            "/leads/import",
+            "/api/v1/leads/import",
             files={"file": ("leads.csv", csv_bytes, "text/csv")},
             data={"mappings": "{not json"},
             headers=auth_headers(),
@@ -114,7 +114,7 @@ class TestProcessingCrash:
         assert error["code"] == "import_failed"
         import_id = error["details"][0]["import_id"]
 
-        status_body = client.get(f"/imports/{import_id}", headers=auth_headers()).json()
+        status_body = client.get(f"/api/v1/imports/{import_id}", headers=auth_headers()).json()
         assert status_body["status"] == ImportStatus.FAILED
         assert "simulated crash" in status_body["error_message"]
 
@@ -130,7 +130,7 @@ class TestProcessingCrash:
         response = upload(client, csv_bytes, auth_headers())
         assert response.status_code == 500
         import_id = response.json()["error"]["details"][0]["import_id"]
-        status_body = client.get(f"/imports/{import_id}", headers=auth_headers()).json()
+        status_body = client.get(f"/api/v1/imports/{import_id}", headers=auth_headers()).json()
         assert status_body["status"] == ImportStatus.FAILED
         # Atomicity: no half-imported leads from the failed batch.
         assert db.query(Lead).count() == 0
@@ -139,7 +139,7 @@ class TestProcessingCrash:
 class TestEventDeliveryFailure:
     def _create_lead(self, client):
         return client.post(
-            "/leads",
+            "/api/v1/leads",
             json={"name": "Rahul", "phone": "9876543210", "source": "website"},
             headers=auth_headers(),
         ).json()["id"]
