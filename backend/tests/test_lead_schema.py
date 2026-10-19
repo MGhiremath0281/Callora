@@ -49,7 +49,7 @@ CSV_ROW = [
 
 
 def create_via_json(client, business=BIZ_2):
-    response = client.post("/leads", json=JSON_PAYLOAD, headers=auth_headers(business))
+    response = client.post("/api/v1/leads", json=JSON_PAYLOAD, headers=auth_headers(business))
     assert response.status_code == 201, response.text
     return response.json()
 
@@ -58,9 +58,9 @@ def create_via_csv(client, business=BIZ_2):
     csv_bytes = build_csv(CSV_HEADER, [CSV_ROW])
     body = upload(client, csv_bytes, auth_headers(business)).json()
     assert body["created"] == 1, body
-    items = client.get("/leads", headers=auth_headers(business)).json()["items"]
+    items = client.get("/api/v1/leads", headers=auth_headers(business)).json()["items"]
     lead_id = next(item["id"] for item in items if item["phone"] == "9876543210")
-    response = client.get(f"/leads/{lead_id}", headers=auth_headers(business))
+    response = client.get(f"/api/v1/leads/{lead_id}", headers=auth_headers(business))
     assert response.status_code == 200
     return response.json()
 
@@ -102,7 +102,7 @@ class TestStandardizedLeadSchema:
 
     def test_deal_value_null_stays_null(self, client):
         response = client.post(
-            "/leads",
+            "/api/v1/leads",
             json={"name": "Priya", "phone": "9812345678", "source": "website"},
             headers=auth_headers(BIZ_2),
         )
@@ -121,6 +121,6 @@ class TestStandardizedLeadSchema:
 
     def test_list_endpoint_uses_standard_schema(self, client):
         create_via_json(client)
-        items = client.get("/leads", headers=auth_headers(BIZ_2)).json()["items"]
+        items = client.get("/api/v1/leads", headers=auth_headers(BIZ_2)).json()["items"]
         assert len(items) == 1
         assert set(items[0].keys()) == STANDARD_LEAD_KEYS

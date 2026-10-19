@@ -102,6 +102,26 @@ def create_lead(
     # committed lead always has a reliable lead.created event record.
     events_service.enqueue_lead_created(db, business_id, lead.id)
 
+    # Project into agent_leads in the same transaction so manually
+    # created leads are immediately visible to the Agent Leads API,
+    # exactly like CSV-imported leads.
+    from app.modules.agent_storage.service import upsert_agent_lead
+
+    upsert_agent_lead(
+        db,
+        lead_id=lead.id,
+        business_id=business_id,
+        name=lead.name,
+        phone=lead.phone,
+        source=lead.source,
+        email=lead.email,
+        language=lead.language,
+        deal_value=lead.deal_value,
+        last_contact_at=lead.last_contact_at,
+        custom_fields=lead.custom_fields,
+        external_crm_id=lead.external_id,
+    )
+
     if idempotency_key:
         try:
             with db.begin_nested():
