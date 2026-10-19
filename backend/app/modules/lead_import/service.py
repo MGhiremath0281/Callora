@@ -41,7 +41,6 @@ from app.modules.lead_import.validators import RowValidationError, validate_row
 logger = get_logger(__name__)
 
 COMMIT_CHUNK_SIZE = 500
-PREVIEW_SAMPLE_SIZE = 5
 
 # Error codes surfaced through the row-level errors endpoint.
 ERROR_INVALID = "validation_error"
@@ -137,85 +136,6 @@ def apply_custom_field_policy(
     return custom_fields
 
 
-def build_preview(
-    session: Session,
-    business_id: str,
-    parsed: ParsedFile,
-    settings: Settings,
-    overrides: Optional[Dict[str, str]] = None,
-) -> Dict[str, Any]:
-    """Compute the pre-import preview: mappings, valid/invalid/duplicate
-    rows and sample data. Nothing is persisted."""
-    suggestions, resolved = detect_preview(parsed.columns)
-    final_mapping = resolve_mappings(parsed.columns, overrides)
-    checker = DuplicateChecker(session, business_id)
-
-    valid = 0
-    invalid = 0
-    duplicates = 0
-    invalid_samples: List[Dict[str, Any]] = []
-    valid_samples: List[Dict[str, Any]] = []
-    warnings: List[str] = []
-
-    for index, row in enumerate(parsed.rows, start=2):  # row 1 is the header
-        mapped = build_row_values(row, final_mapping)
-        mapped["custom_fields"] = apply_custom_field_policy(
-            mapped.get("custom_fields") or {}, settings
-        )
-        validated = validate_row(mapped, settings)
-        warnings.extend(validated.values.get("_notes", []))
-        if not validated.is_valid:
-            invalid += 1
-            if len(invalid_samples) < PREVIEW_SAMPLE_SIZE:
-                invalid_samples.append(
-                    {
-                        "row_number": index,
-                        "errors": [e.to_dict() for e in validated.errors],
-                    }
-                )
-            continue
-        reason = checker.check(validated.values)
-        if reason:
-            duplicates += 1
-            continue
-        checker.register_created(validated.values)
-        valid += 1
-        if len(valid_samples) < PREVIEW_SAMPLE_SIZE:
-            valid_samples.append(
-                {"row_number": index, "lead": _preview_lead(validated.values)}
-            )
-
-    ambiguous = [s.to_dict() for s in suggestions if s.ambiguous]
-    return {
-        "total_rows": parsed.row_count,
-        "mapping": {
-            "suggestions": [s.to_dict() for s in suggestions],
-            "resolved": {k: v for k, v in final_mapping.items()},
-            "ambiguous": ambiguous,
-            "requires_confirmation": bool(ambiguous),
-        },
-        "counts": {
-            "valid": valid,
-            "invalid": invalid,
-            "duplicates": duplicates,
-        },
-        "samples": {
-            "valid": valid_samples,
-            "invalid": invalid_samples,
-        },
-        "warnings": sorted(set(warnings)),
-        "unmapped_columns": [c for c, t in final_mapping.items() if t is None],
-    }
-
-
-def _preview_lead(values: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        key: (str(value) if key == "deal_value" else value)
-        for key, value in values.items()
-        if key in ("name", "phone", "email", "source", "language", "deal_value", "last_contact_at")
-    }
-
-
 def create_batch(
     session: Session,
     business_id: str,
@@ -261,13 +181,16 @@ def process_import(
     parsed: ParsedFile,
     final_mapping: Dict[str, Optional[str]],
     settings: Settings,
-) -> ImportBatch:
+) -> list[str]:
     """Run the full pipeline for one import batch and persist everything.
 
     Counts reconcile exactly: ``total_rows == created + duplicates +
     rejected``. Per-row inserts use savepoints so one bad row (for
     example a uniqueness race on phone) is reported as a duplicate
     without aborting the batch.
+
+    Returns a list of lead IDs that were successfully created, used to
+    trigger automatic CRM synchronization after the import commits.
     """
     batch = session.get(ImportBatch, import_id)
     if batch is None:
@@ -279,6 +202,7 @@ def process_import(
 
     checker = DuplicateChecker(session, batch.business_id)
     created = duplicates = rejected = 0
+    created_lead_ids: list[str] = []
 
     try:
         for index, row in enumerate(parsed.rows, start=2):  # row 1 is the header
@@ -335,6 +259,7 @@ def process_import(
 
             events_service.enqueue_lead_created(session, batch.business_id, lead.id)
             checker.register_created(validated.values)
+            created_lead_ids.append(lead.id)
             created += 1
 
             if (created + duplicates + rejected) % COMMIT_CHUNK_SIZE == 0:
@@ -361,7 +286,7 @@ def process_import(
         logger.exception("import failed", extra={"import_id": import_id})
         raise
 
-    return batch
+    return created_lead_ids
 
 
 def import_summary(batch: ImportBatch) -> Dict[str, Any]:
@@ -373,7 +298,7 @@ def import_summary(batch: ImportBatch) -> Dict[str, Any]:
         "created": batch.created_count,
         "duplicates": batch.duplicate_count,
         "rejected": batch.rejected_count,
-        "errors_url": f"/imports/{batch.id}/errors",
+        "errors_url": f"/api/v1/imports/{batch.id}/errors",
     }
 
 
