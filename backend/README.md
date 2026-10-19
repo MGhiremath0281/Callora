@@ -41,6 +41,7 @@ docs: `/docs`.
 | Method | Endpoint                    | Purpose                                   |
 |--------|-----------------------------|-------------------------------------------|
 | GET    | `/api/v1/crm/connections`   | List the business's CRM connections       |
+| POST   | `/api/v1/crm/connections`   | Create/update + validate the external CRM connection |
 | POST   | `/api/v1/crm/sync`          | Manually synchronize one lead with the CRM |
 
 **Agent Leads (downstream AI agents)**
@@ -115,7 +116,63 @@ Retrying an import never creates duplicate records: the database-level
 uniqueness constraint on `(business_id, phone)` is the final backstop,
 and `Idempotency-Key` headers replay prior import/create results.
 
+### External CRM connection (Module 2)
+
+There are **two independent authentication layers** and the keys are never
+interchangeable:
+
+| Layer | Header | Configured by |
+|---|---|---|
+| Incoming requests to Callora | `X-API-Key` | `CALLORA_API_KEYS` |
+| Outgoing requests to the business's CRM | `x-api-key` | The business, via `POST /api/v1/crm/connections` |
+
+A business registers its external CRM:
+
+```http
+POST /api/v1/crm/connections
+X-API-Key: <Callora key>
+
+{
+  "connection_id": "urban-1",
+  "name": "UrbanNest CRM",
+  "crm_base_url": "https://crm.example.com",
+  "crm_x_api_key": "<external CRM key>",
+  "crm_timeout_seconds": 15
+}
+```
+
+Callora performs a **real** `GET /health` request against the supplied URL
+using the supplied `x-api-key` before saving. Nothing is persisted and the
+connection is never reported `verified` unless that call succeeds. Submitting
+the same `connection_id` updates the existing row in place.
+
+The external key is stored server-side, used only for outbound CRM calls, and
+never appears in responses (`has_api_key: true/false`) or logs. Error
+messages are key-redacted. `crm_base_url` is SSRF-validated: only absolute
+`http(s)` URLs are accepted, and loopback/private/link-local/metadata
+destinations are rejected. The same check re-runs **before every outgoing
+request** (on the resolved IPs) and redirects are never followed, so a
+hostname that later resolves internally is still blocked.
+
+For a local fake CRM that must be reached over a private address, use the
+narrow, explicit development allowlist instead of disabling SSRF protection:
+
+```bash
+# Development only — exact host:port pairs, empty by default.
+CALLORA_CRM_DEV_ALLOWED_DESTINATIONS=host.docker.internal:9000
+```
+
+Only those exact `host:port` pairs bypass the private-address rule; every
+other private, loopback, and link-local destination stays blocked.
+`CALLORA_CRM_ALLOW_PRIVATE_URLS=true` remains the broader (discouraged)
+legacy escape hatch for local testing.
+
+`POST /api/v1/crm/sync` takes only `{connection_id, lead, idempotency_key?}` —
+the stored connection supplies the URL and its `x-api-key`; the key is never
+sent in the sync request.
+
 ### Events (transactional outbox)
+
 
 `lead.created` events are written to the `outbox_events` table in the
 same transaction as the lead itself:
@@ -148,6 +205,12 @@ All errors share one envelope:
 | `payload_too_large`         | 413  | File exceeds `CALLORA_MAX_UPLOAD_SIZE_MB`|
 | `row_limit_exceeded`        | 413  | Rows exceed `CALLORA_MAX_ROWS_PER_IMPORT`|
 | `import_failed`             | 500  | Import crashed; the failed batch report remains available at `/api/v1/imports/{id}` |
+| `crm_connection_not_found` / `crm_connection_inactive` | 404 / 400 | Unknown or disabled CRM connection |
+| `crm_authentication_failed` | 502  | External CRM rejected the supplied/stored API key |
+| `crm_unavailable` / `crm_timeout` | 503 / 504 | External CRM unreachable / too slow |
+| `crm_connection_validation_failed` | 502 | Connection validation failed (e.g. CRM has no `GET /health`) |
+| `crm_idempotency_conflict`  | 409  | Idempotency key reused with a different payload |
+| `crm_sync_failed`           | 502  | Sync failed; lead/import data remain intact |
 | `internal_error`            | 500  | Unexpected failure                       |
 
 ### Configuration (all `CALLORA_`-prefixed)
@@ -165,6 +228,11 @@ All errors share one envelope:
 | `EVENT_WEBHOOK_URL` | *(unset)* | Optional `lead.created` delivery URL |
 | `EVENT_PUBLISH_MAX_ATTEMPTS` | `5` | Delivery attempts before `failed` |
 | `LOG_LEVEL` / `DEBUG` | `INFO` / `false` | Structured JSON logs; `debug` re-raises masked 500s |
+| `CRM_BASE_URL` / `CRM_API_KEY` | *(unset)* | Optional dev seed for a default CRM connection; businesses normally configure their own via `POST /api/v1/crm/connections` |
+| `CRM_TIMEOUT_SECONDS` | `15` | Outbound CRM request timeout |
+| `CRM_BUSINESS_NAME` | `UrbanNest Realty` | `business_name` sent in the contact payload |
+| `CRM_ALLOW_PRIVATE_URLS` | `false` | Dev-only opt-out of SSRF protection (allows every private destination) |
+| `CRM_DEV_ALLOWED_DESTINATIONS` | *(empty)* | Dev-only explicit `host:port` allowlist for non-public CRM destinations, e.g. `host.docker.internal:9000` |
 
 ### Project structure
 

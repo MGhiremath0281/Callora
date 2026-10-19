@@ -1,6 +1,6 @@
 # Callora — Workflow & Endpoint Testing Guide
 
-How to test **all 11 business endpoints** and the full end-to-end workflow:
+How to test **all 12 business endpoints** and the full end-to-end workflow:
 
 ```
 CSV upload → map & standardize → validate & deduplicate → persist leads
@@ -47,7 +47,7 @@ Interactive API docs: `$BASE/docs`
 
 ---
 
-## 2. The 11-route allowlist
+## 2. The 12-route allowlist
 
 | # | Method | Route | Purpose |
 |---|--------|-------|---------|
@@ -58,10 +58,11 @@ Interactive API docs: `$BASE/docs`
 | 5 | GET | `/api/v1/imports/{import_id}` | Import status and summary |
 | 6 | GET | `/api/v1/imports/{import_id}/errors` | Import validation errors |
 | 7 | GET | `/api/v1/crm/connections` | List CRM connections |
-| 8 | POST | `/api/v1/crm/sync` | Manual CRM synchronization |
-| 9 | GET | `/api/v1/agent/leads` | List agent-ready leads |
-| 10 | GET | `/api/v1/agent/leads/{lead_id}` | Retrieve an agent-ready lead |
-| 11 | GET | `/api/v1/agent/leads/by-external/{external_crm_id}` | Find a lead by external CRM ID |
+| 8 | POST | `/api/v1/crm/connections` | Create/update the external CRM connection |
+| 9 | POST | `/api/v1/crm/sync` | Manual CRM synchronization |
+| 10 | GET | `/api/v1/agent/leads` | List agent-ready leads |
+| 11 | GET | `/api/v1/agent/leads/{lead_id}` | Retrieve an agent-ready lead |
+| 12 | GET | `/api/v1/agent/leads/by-external/{external_crm_id}` | Find a lead by external CRM ID |
 
 Infrastructure (kept, outside the allowlist): `GET /`, `GET /health`, `/docs`.
 
@@ -288,10 +289,17 @@ class FakeCRM(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_GET(self):                        # GET /health -> connectivity check
+        if self.path != "/health":
+            return self._send({"error": "not found"}, 404)
+        if self.headers.get("x-api-key") != "crm-secret-token":
+            return self._send({"error": "unauthorized"}, 401)
+        self._send({"status": "ok"})
+
     def do_POST(self):                       # POST /contacts  -> create
         n = int(self.headers.get("Content-Length", 0))
         payload = json.loads(self.rfile.read(n) or b"{}")
-        if self.headers.get("Authorization") != "Bearer crm-secret-token":
+        if self.headers.get("x-api-key") != "crm-secret-token":
             return self._send({"error": "unauthorized"}, 401)
         if self.path == "/contacts":
             return self._send({"id": f"CRM-{next(counter):04d}",
@@ -301,28 +309,84 @@ class FakeCRM(BaseHTTPRequestHandler):
     def do_PATCH(self):                      # PATCH /contacts/{id} -> update
         n = int(self.headers.get("Content-Length", 0))
         self.rfile.read(n)
+        if self.headers.get("x-api-key") != "crm-secret-token":
+            return self._send({"error": "unauthorized"}, 401)
         self._send({"id": self.path.rsplit("/", 1)[-1]})
 
 HTTPServer(("127.0.0.1", 9000), FakeCRM).serve_forever()
 ```
 
-### Step 2 — Start the backend with CRM configuration
+### Step 2 — Start the backend
 
 ```bash
 cd backend
 export CALLORA_DATABASE_URL="sqlite:///./callora.db"
 export CALLORA_API_KEYS="biz_001:dev-key-biz-001,biz_002:dev-key-biz-002"
-export CALLORA_CRM_BASE_URL="http://127.0.0.1:9000"
-export CALLORA_CRM_API_KEY="crm-secret-token"
 uvicorn app.main:app --port 8000
 ```
 
-On startup the app seeds a **default connection per business** automatically.
+No CRM configuration is required here: the business supplies its external CRM
+URL and API key through the connection endpoint below. (The optional
+`CALLORA_CRM_BASE_URL` / `CALLORA_CRM_API_KEY` env vars only seed a default
+connection for local convenience.)
 
-> With Docker Compose, `CALLORA_CRM_BASE_URL=http://host.docker.internal:9000`
-> is already set — run `fake_crm.py` on the host and use Compose as-is.
+> **Fake CRM on the Docker/WSL host (Docker → host):** connection URLs are
+> SSRF-validated, so `http://host.docker.internal:9000` is rejected unless it
+> is explicitly allowlisted. For local development start the backend with an
+> exact `host:port` exception:
+>
+> ```bash
+> export CALLORA_CRM_DEV_ALLOWED_DESTINATIONS=host.docker.internal:9000
+> ```
+>
+> Only that pair is allowed — other ports and every other private, loopback,
+> or link-local destination stay blocked. Leave the variable unset in
+> production. (`CALLORA_CRM_ALLOW_PRIVATE_URLS=true` is the broader legacy
+> local-testing switch and is not recommended.)
 
-### Step 3 — Verify the connection
+### Step 3 — Save and validate the connection
+
+`crm_base_url` is the external CRM's base URL; `crm_x_api_key` is the
+external CRM's own credential (never Callora's). Callora validates the
+connection with a real `GET /health` call before saving:
+
+```bash
+curl -s -X POST "$BASE/api/v1/crm/connections" -H "$H" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "connection_id": "urban-1",
+       "name": "UrbanNest CRM",
+       "crm_base_url": "http://127.0.0.1:9000",
+       "crm_x_api_key": "crm-secret-token",
+       "crm_timeout_seconds": 15
+     }'
+```
+
+**Verified — HTTP 200** (the key is never echoed back):
+
+```json
+{ "connection": { "connection_id": "urban-1", "name": "UrbanNest CRM",
+                  "is_active": true, "crm_base_url": "http://127.0.0.1:9000",
+                  "has_api_key": true, "crm_timeout_seconds": 15.0,
+                  "created_at": "…", "updated_at": "…" },
+  "verified": true,
+  "message": "Connection validated against the external CRM (GET /health) and saved." }
+```
+
+Validation failures save nothing and never report `verified`:
+
+| Failure | HTTP | `error.code` |
+|---|---|---|
+| CRM rejects the API key (401/403) | 502 | `crm_authentication_failed` |
+| CRM unreachable / connection refused | 503 | `crm_unavailable` |
+| CRM timed out | 504 | `crm_timeout` |
+| Wrong endpoint / unknown contract | 502 | `crm_connection_validation_failed` |
+
+`POST` with the same `connection_id` updates that row in place (no duplicates).
+URLs are SSRF-guarded: only absolute `http(s)` URLs are accepted, and
+loopback/private/link-local/metadata destinations are rejected with `422`.
+
+### Step 4 — Verify the connection
 
 ```bash
 curl -s "$BASE/api/v1/crm/connections" -H "$H"
@@ -331,14 +395,15 @@ curl -s "$BASE/api/v1/crm/connections" -H "$H"
 **Verified — HTTP 200:**
 
 ```json
-[ { "connection_id": "default", "name": "Default CRM Connection",
+[ { "connection_id": "urban-1", "name": "UrbanNest CRM",
     "is_active": true, "crm_base_url": "http://127.0.0.1:9000",
-    "crm_timeout_seconds": 15.0, "created_at": "…", "updated_at": "…" } ]
+    "has_api_key": true, "crm_timeout_seconds": 15.0,
+    "created_at": "…", "updated_at": "…" } ]
 ```
 
 The API key is **never** included in this response.
 
-### Step 4 — Import → automatic synchronization
+### Step 5 — Import → automatic synchronization
 
 ```bash
 curl -s -X POST "$BASE/api/v1/leads/import" -H "$H" -F "file=@sample.csv"
@@ -367,7 +432,7 @@ never sent to the CRM. Contacts are created (`POST /contacts`) on first sync
 and updated (`PATCH /contacts/{id}`) on later syncs via the stored
 `external_id` mapping, so retries don't create duplicate contacts.
 
-### Step 5 — Manual synchronization (still available)
+### Step 6 — Manual synchronization (still available)
 
 ```bash
 curl -s -X POST "$BASE/api/v1/crm/sync" -H "$H" -H "Content-Type: application/json" \
@@ -405,7 +470,7 @@ curl -s -X POST "$BASE/api/v1/crm/sync" -H "$H" -H "Content-Type: application/js
 `status` is `created` for a new contact, `updated` when a stored external ID
 exists. A failure can never be reported as success.
 
-### Step 6 — Failure cases (leads must never be lost)
+### Step 7 — Failure cases (leads must never be lost)
 
 Point a connection at a dead CRM and sync:
 
@@ -468,7 +533,9 @@ curl -s "$BASE/api/v1/crm/connections" -H "X-API-Key: dev-key-biz-002"
 # []
 ```
 
-Credentials stay server-side: `crm_api_key` never appears in any response.
+Credentials stay server-side: the external CRM API key never appears in any
+response (only `has_api_key: true/false`), and Callora's own `X-API-Key` is
+never forwarded to the external CRM.
 
 ---
 
@@ -479,7 +546,7 @@ curl -s $BASE/openapi.json | python3 -c "
 import json, sys
 paths = json.load(sys.stdin)['paths']
 biz = sorted((m.upper(), p) for p, i in paths.items() for m in i if p.startswith('/api/v1/'))
-print('business operations:', len(biz))          # -> 11
+print('business operations:', len(biz))          # -> 12
 print('double prefix:', [p for p in paths if '/api/v1/api/v1' in p])   # -> []
 print('unversioned:', [p for p in paths if not p.startswith('/api/v1/') and p not in ('/', '/health')])
 # -> []
@@ -489,7 +556,7 @@ print('unversioned:', [p for p in paths if not p.startswith('/api/v1/') and p no
 Expected output:
 
 ```
-business operations: 11
+business operations: 12
 double prefix: []
 unversioned: []
 ```
@@ -503,7 +570,7 @@ cd backend
 python3 -m pytest tests/ -q
 ```
 
-**Expected: `176 passed`** (plus 1 upstream Starlette deprecation warning).
+**Expected: `201 passed`** (plus 1 upstream Starlette deprecation warning).
 
 Coverage map:
 
@@ -517,7 +584,8 @@ Coverage map:
 | Duplicate prevention & retry/idempotency | `test_crm_sync.py`, `test_dedup.py`, `test_api_leads.py` |
 | Persistence of external CRM IDs & sync results | `test_crm_sync.py`, `test_auto_sync.py` |
 | All 3 Agent Leads endpoints | `test_agent_storage.py`, `test_api_leads.py` |
-| CRM Connections endpoint | `test_crm_sync.py::TestCRMConnectionsEndpoint` |
+| CRM connection configuration & validation | `test_crm_connections.py` |
+| CRM Connections listing endpoint | `test_crm_sync.py::TestCRMConnectionsEndpoint` |
 | Manual CRM synchronization | `test_crm_sync.py` |
 | Business-level access isolation | all of the above (cross-tenant 404/401/empty) |
 | Route registration, no duplicate `/api/v1` | `test_auto_sync.py::TestRouteRegistration` |
