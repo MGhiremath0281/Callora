@@ -22,18 +22,34 @@ on startup.
 
 ### API endpoints
 
+All business routes are served **only** under `/api/v1`. Interactive
+docs: `/docs`.
+
+**Module 1 — Leads & Imports**
+
 | Method | Endpoint                    | Purpose                                   |
 |--------|-----------------------------|-------------------------------------------|
-| POST   | `/leads/import/preview`     | Detect mappings, validate, count duplicates — nothing is stored |
-| POST   | `/leads/import`             | Upload a CSV and run the import pipeline  |
-| POST   | `/leads`                    | Create a lead from a JSON request         |
-| GET    | `/leads`                    | List leads (`source`, `query`, `created_after/before`, `page`, `page_size`) |
-| GET    | `/leads/{lead_id}`          | Retrieve an individual lead               |
-| GET    | `/imports/{import_id}`      | Import status and summary                 |
-| GET    | `/imports/{import_id}/errors` | Row-level validation/duplicate errors   |
+| POST   | `/api/v1/leads/import`      | Upload a CSV and run the import pipeline  |
+| POST   | `/api/v1/leads`             | Create a lead from a JSON request         |
+| GET    | `/api/v1/leads`             | List leads (`source`, `query`, `created_after/before`, `page`, `page_size`) |
+| GET    | `/api/v1/leads/{lead_id}`   | Retrieve an individual lead               |
+| GET    | `/api/v1/imports/{import_id}` | Import status and summary               |
+| GET    | `/api/v1/imports/{import_id}/errors` | Row-level validation/duplicate errors |
 
-All endpoints are also available under the `/api/v1` prefix. Interactive
-docs: `/docs`.
+**Module 2 — CRM Synchronization**
+
+| Method | Endpoint                    | Purpose                                   |
+|--------|-----------------------------|-------------------------------------------|
+| GET    | `/api/v1/crm/connections`   | List the business's CRM connections       |
+| POST   | `/api/v1/crm/sync`          | Manually synchronize one lead with the CRM |
+
+**Agent Leads (downstream AI agents)**
+
+| Method | Endpoint                    | Purpose                                   |
+|--------|-----------------------------|-------------------------------------------|
+| GET    | `/api/v1/agent/leads`       | List agent-ready leads (paginated, business-scoped) |
+| GET    | `/api/v1/agent/leads/{lead_id}` | Retrieve an agent-ready lead          |
+| GET    | `/api/v1/agent/leads/by-external/{external_crm_id}` | Find a lead by external CRM ID |
 
 ### Authentication
 
@@ -54,7 +70,7 @@ never trusted from uploaded or submitted data. Cross-tenant reads return
    with a `mappings` JSON form field to confirm ambiguous columns:
 
    ```bash
-   curl -X POST /leads/import -H "X-API-Key: $KEY" \
+   curl -X POST /api/v1/leads/import -H "X-API-Key: $KEY" \
         -F file=@leads.csv \
         -F 'mappings={"Source Channel": "source"}'
    ```
@@ -65,23 +81,28 @@ never trusted from uploaded or submitted data. Cross-tenant reads return
    Low-confidence suggestions are reported as `ambiguous` and withheld
    until the business confirms them. `First Name` + `Last Name` columns
    are combined into `name`.
-3. **Preview** (`/leads/import/preview`) shows detected mappings, valid,
-   invalid and duplicate rows, samples, and warnings without storing
-   anything.
-4. **Validate** — required fields (name, phone, source), phone/email/
+3. **Validate** — required fields (name, phone, source), phone/email/
    date/number formats, and configurable file-size and row limits.
-5. **Normalize** — consistent formats without guessing ambiguous values
+4. **Normalize** — consistent formats without guessing ambiguous values
    (e.g. a 10-digit mobile stays as-is; no country code is invented).
-6. **Deduplicate** — against existing leads for the business *and*
+5. **Deduplicate** — against existing leads for the business *and*
    within the uploaded file, keyed on normalized phone.
-7. **Import** — valid rows are persisted; small files run synchronously,
+6. **Import** — valid rows are persisted; small files run synchronously,
    files above `CALLORA_SYNC_PROCESSING_ROW_THRESHOLD` rows run in the
-   background (`202 Accepted`, poll `/imports/{id}`).
-8. **Report** — `created` + `duplicates` + `rejected` always reconcile
+   background (`202 Accepted`, poll `/api/v1/imports/{id}`).
+7. **Report** — `created` + `duplicates` + `rejected` always reconcile
    with `total_rows`; row-level errors are served from
-   `/imports/{id}/errors`.
-9. **Events** — each committed lead atomically stages a `lead.created`
+   `/api/v1/imports/{id}/errors`.
+8. **Events** — each committed lead atomically stages a `lead.created`
    outbox event (see below).
+9. **Agent-ready data** — every imported lead is projected into
+   `agent_leads`, so the Agent Leads endpoints expose it immediately.
+10. **Automatic CRM sync** — after persistence, if the business has an
+    active CRM connection the imported leads are synchronized in the
+    background: external CRM IDs, sync status, per-lead results and
+    idempotency records are persisted. CRM failures are recorded but
+    never affect the import — the leads remain stored and agent-visible
+    whether or not CRM synchronization succeeds.
 
 Unmapped columns are captured into the lead's `custom_fields`
 (configurable via `CALLORA_AUTO_CAPTURE_CUSTOM_FIELDS` and
@@ -126,7 +147,7 @@ All errors share one envelope:
 | `malformed_file`            | 422  | Empty/unparseable CSV, bad `mappings`    |
 | `payload_too_large`         | 413  | File exceeds `CALLORA_MAX_UPLOAD_SIZE_MB`|
 | `row_limit_exceeded`        | 413  | Rows exceed `CALLORA_MAX_ROWS_PER_IMPORT`|
-| `import_failed`             | 500  | Import crashed; the failed batch report remains available at `/imports/{id}` |
+| `import_failed`             | 500  | Import crashed; the failed batch report remains available at `/api/v1/imports/{id}` |
 | `internal_error`            | 500  | Unexpected failure                       |
 
 ### Configuration (all `CALLORA_`-prefixed)
@@ -190,7 +211,7 @@ two fractional digits. This is the contract downstream modules consume.
 ```bash
 cd backend
 pip install -r requirements.txt
-pytest tests -q        # 114 tests: unit, API, integration, failure handling, schema verification
+pytest tests -q        # 168 tests: unit, API, integration, auto-CRM-sync, route registration, failure handling, schema verification
 ```
 
 Tests run on an isolated SQLite database per test (models use portable
