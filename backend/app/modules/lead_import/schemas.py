@@ -126,17 +126,6 @@ class MappingSuggestionModel(BaseModel):
     alternatives: List[str] = Field(default_factory=list)
 
 
-class ImportPreviewResponse(BaseModel):
-    """Output of ``POST /leads/import/preview`` — nothing is stored."""
-
-    total_rows: int
-    mapping: Dict[str, Any]
-    counts: Dict[str, int]
-    samples: Dict[str, List[Dict[str, Any]]]
-    warnings: List[str] = Field(default_factory=list)
-    unmapped_columns: List[str] = Field(default_factory=list)
-
-
 class ImportSummary(BaseModel):
     import_id: str
     status: str
