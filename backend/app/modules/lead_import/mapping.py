@@ -243,7 +243,8 @@ def resolve_mappings(
     """Produce the final ``{incoming_column: canonical_field}`` mapping.
 
     ``overrides`` (business-confirmed mappings) always win and may map a
-    column to ``"custom"`` (force into custom_fields) or ``None`` (ignore).
+    column to ``"custom"`` (force into custom_fields), ``"ignore"`` (skip
+    entirely), or ``None`` (ignore).
     """
     suggestions = merge_first_last_name(detect_mappings(columns))
     resolved: Dict[str, Optional[str]] = {}
@@ -258,7 +259,12 @@ def resolve_mappings(
     for column, override in (overrides or {}).items():
         if column not in {c for c in columns}:
             continue
-        resolved[column] = None if override in ("", "custom", "ignore") else override
+        if override in ("", None):
+            resolved[column] = None
+        elif override in ("custom", "ignore"):
+            resolved[column] = override
+        else:
+            resolved[column] = override
     return resolved
 
 
@@ -281,6 +287,14 @@ def build_row_values(
         target = resolved.get(column)
         if target == "name_part":
             name_parts_values.append(str(raw_value or "").strip())
+            used_columns.add(column)
+        elif target == "ignore":
+            # Explicitly ignored by the business — skip entirely.
+            used_columns.add(column)
+        elif target == "custom":
+            # Force into custom_fields.
+            if raw_value is not None and str(raw_value).strip():
+                custom_fields[normalize_header(column) or column] = str(raw_value).strip()
             used_columns.add(column)
         elif target and target in values and not values[target]:
             values[target] = str(raw_value).strip() if raw_value is not None else None
