@@ -13,6 +13,7 @@ A failed CRM sync never deletes or invalidates the canonical lead.
 
 import hashlib
 import json
+from decimal import Decimal, InvalidOperation
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -20,6 +21,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app import errors as app_errors
+from app.config import get_settings
 from app.errors import (
     CRMConnectionInactiveError,
     CRMConnectionNotFoundError,
@@ -27,6 +30,7 @@ from app.errors import (
     LeadNotFoundError,
 )
 from app.models import (
+    AgentLead,
     CRMSyncIdempotency,
     CRMSyncRecord,
     CRMSyncStatus,
@@ -45,9 +49,12 @@ from app.modules.crm_sync.schemas import CRMSyncRequest, CRMSyncResponse
 
 
 def _compute_payload_hash(lead: Any) -> str:
-    """Compute a stable hash of the canonical lead payload.
+    """Compute a stable hash of the request's lead object.
 
-    Used to detect idempotency-key reuse with a different payload.
+    Used to detect idempotency-key reuse with a different request
+    payload. Note this identifies the *request* only — the data actually
+    sent to the CRM is always taken from the persisted lead, never from
+    client-supplied values.
     """
     canonical = json.dumps(
         {
@@ -79,6 +86,43 @@ class CRMSyncService:
 
     def __init__(self, session: Session):
         self.session = session
+
+    @staticmethod
+    async def validate_connection(connection: CRMConnection) -> None:
+        """Verify reachability and authentication of a CRM connection.
+
+        Performs a real request to the external CRM's documented
+        ``GET /health`` endpoint using the connection's stored URL and
+        API key. Raises the app-level errors so the API returns a clear
+        status; the stored key is never echoed back or logged.
+        """
+        client = CRMClient.from_connection(connection)
+        try:
+            await client.get_health()
+        except CRMAuthError as exc:
+            raise app_errors.CRMAuthError(
+                "The external CRM rejected the supplied API key "
+                "(HTTP 401/403); check crm_x_api_key."
+            ) from exc
+        except CRMTimeoutError as exc:
+            raise app_errors.CRMTimeoutError(
+                f"The external CRM at {connection.crm_base_url} did not "
+                f"respond within {connection.crm_timeout_seconds:g}s."
+            ) from exc
+        except CRMUnavailableError as exc:
+            raise app_errors.CRMUnavailableError(
+                f"The external CRM at {connection.crm_base_url} is "
+                f"unreachable: {exc}"
+            ) from exc
+        except CRMClientError as exc:
+            raise app_errors.CRMConnectionValidationError(
+                f"External CRM validation failed: {exc}. If this CRM does "
+                "not expose GET /health, provider-specific verification "
+                "is required before connecting.",
+                details=[{"connection_id": connection.connection_id}],
+            ) from exc
+        finally:
+            await client.close()
 
     def _resolve_connection(
         self, business_id: str, connection_id: str
@@ -182,32 +226,71 @@ class CRMSyncService:
             existing.status = "completed"
 
     @staticmethod
-    def _to_crm_payload(lead: Any) -> dict:
-        """Convert Callora's lead fields to the external CRM's API format."""
+    def _to_crm_number(value: Any) -> Optional[float]:
+        """Best-effort numeric conversion for budget fields.
+
+        CSV imports capture budgets as text, so values may arrive as
+        strings. Returns ``None`` when no real numeric data exists.
+        """
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        try:
+            number = Decimal(str(value).strip())
+        except (InvalidOperation, ValueError):
+            return None
+        if number != number.to_integral_value():
+            return float(number)
+        return int(number)
+
+    @staticmethod
+    def _to_crm_payload(
+        lead: Any, *, business_name: str, lead_status: str
+    ) -> dict:
+        """Map a persisted Callora lead to the UrbanNestCRM contact schema.
+
+        ``POST /contacts`` accepts ``business_name``, ``full_name``,
+        ``phone``, ``email``, ``lead_source``, ``lead_status``,
+        ``property_type``, ``preferred_city``, ``budget_min``,
+        ``budget_max`` and ``last_contact_at``.
+
+        Callora's ``custom_fields`` are never forwarded verbatim —
+        individual values are promoted into the documented contact fields
+        only when real data exists on the lead.
+        """
         custom_fields = lead.custom_fields or {}
 
         payload = {
+            "business_name": business_name,
             "full_name": lead.name,
             "phone": lead.phone,
             "email": lead.email,
             "lead_source": lead.source,
-            "last_contact_at": (
-                lead.last_contact_at.isoformat()
-                if lead.last_contact_at
-                else None
-            ),
+            "lead_status": lead_status,
         }
 
-        # Map optional CRM fields from imported custom fields.
-        for field in (
-            "property_type",
-            "preferred_city",
-            "budget_min",
-            "budget_max",
-        ):
-            value = custom_fields.get(field)
-            if value is not None:
-                payload[field] = value
+        property_type = custom_fields.get("property_type")
+        if property_type:
+            payload["property_type"] = str(property_type)
+
+        # CSV imports store the city column as "city"; an explicit
+        # "preferred_city" key wins when both exist.
+        city = custom_fields.get("preferred_city") or custom_fields.get("city")
+        if city:
+            payload["preferred_city"] = str(city)
+
+        # Explicit budget bounds from the data win; a single canonical
+        # deal_value is sent as an exact budget (min == max).
+        budget_min = CRMSyncService._to_crm_number(custom_fields.get("budget_min"))
+        budget_max = CRMSyncService._to_crm_number(custom_fields.get("budget_max"))
+        if budget_min is None and budget_max is None and lead.deal_value is not None:
+            budget_min = budget_max = CRMSyncService._to_crm_number(lead.deal_value)
+        if budget_min is not None:
+            payload["budget_min"] = budget_min
+        if budget_max is not None:
+            payload["budget_max"] = budget_max
+
+        if lead.last_contact_at is not None:
+            payload["last_contact_at"] = lead.last_contact_at.isoformat()
 
         if not payload["full_name"] or not payload["phone"]:
             raise ValueError("Lead must contain both name and phone.")
@@ -262,8 +345,18 @@ class CRMSyncService:
                 business_id, request.connection_id, request.idempotency_key, payload_hash
             )
 
-        # 6. Build CRM payload and call the external CRM.
-        payload = self._to_crm_payload(lead)
+        # 6. Build the CRM payload from the *persisted* lead. The request
+        # body identifies the lead and participates in idempotency conflict
+        # detection; the data pushed to UrbanNestCRM is always the canonical
+        # database record, so clients cannot fabricate contact fields.
+        agent_record = self.session.get(AgentLead, canonical_lead.id)
+        stored_status = (agent_record.status if agent_record else None) or "New"
+        lead_status = stored_status.strip().lower() or "new"
+        payload = self._to_crm_payload(
+            canonical_lead,
+            business_name=get_settings().crm_business_name,
+            lead_status=lead_status,
+        )
 
         client = CRMClient.from_connection(connection)
         try:
@@ -356,6 +449,7 @@ class CRMSyncService:
             last_contact_at=lead.last_contact_at,
             custom_fields=lead.custom_fields,
             external_crm_id=external_crm_id,
+            status=(agent_record.status if agent_record else "New"),
         )
 
         # Store idempotency result.

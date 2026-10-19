@@ -157,6 +157,14 @@ class CRMSyncError(AppError):
     code = "crm_sync_failed"
 
 
+class CRMConnectionValidationError(AppError):
+    """The submitted CRM connection failed connectivity/authentication
+    validation. The connection is NOT saved and never reported verified."""
+
+    status_code = 502
+    code = "crm_connection_validation_failed"
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def _app_error_handler(_: Request, exc: AppError):
