@@ -14,7 +14,7 @@ import difflib
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from app.services.normalization import normalize_header
+from app.modules.lead_import.normalizer import normalize_header
 
 # Canonical field -> accepted header synonyms (already normalized). The
 # first synonym listed is the canonical header spelling.

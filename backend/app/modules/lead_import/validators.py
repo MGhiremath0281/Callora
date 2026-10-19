@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from app.config import Settings
-from app.services.normalization import (
+from app.modules.lead_import.normalizer import (
     normalize_email,
     normalize_language,
     normalize_name,

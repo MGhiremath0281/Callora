@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from app.services.normalization import (
+from app.modules.lead_import.normalizer import (
     normalize_email,
     normalize_header,
     normalize_language,

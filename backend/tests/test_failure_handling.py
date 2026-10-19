@@ -4,7 +4,7 @@ event delivery failures must never lose data silently."""
 import pytest
 
 from app.models import EventStatus, ImportStatus, Lead, OutboxEvent
-from app.services.events import publish_pending_events
+from app.modules.lead_import.events import publish_pending_events
 from tests.csv_helpers import REALESTATE_HEADER, REALESTATE_ROWS, build_csv, upload
 from tests.conftest import auth_headers
 
@@ -90,7 +90,7 @@ class TestProcessingCrash:
     def test_crash_marks_batch_failed_and_keeps_report_available(self, client, db, monkeypatch):
         """A crash mid-import must record a failed batch with an error
         message that remains retrievable."""
-        import app.services.importer as importer
+        import app.modules.lead_import.service as importer
 
         calls = {"count": 0}
         original = importer.build_row_values
@@ -119,7 +119,7 @@ class TestProcessingCrash:
         assert "simulated crash" in status_body["error_message"]
 
     def test_failed_batch_commits_nothing(self, client, db, monkeypatch):
-        import app.services.importer as importer
+        import app.modules.lead_import.service as importer
 
         def boom(*args, **kwargs):
             raise RuntimeError("system down")
@@ -156,7 +156,7 @@ class TestEventDeliveryFailure:
         def failing_post(url, event, timeout=5.0):
             raise ConnectionError("webhook is down")
 
-        import app.services.events as events
+        import app.modules.lead_import.events as events
 
         monkeypatch.setattr(events, "_post_webhook", failing_post)
         lead_id = self._create_lead(client)
@@ -184,7 +184,7 @@ class TestEventDeliveryFailure:
         current = get_settings()
 
         delivered = []
-        import app.services.events as events
+        import app.modules.lead_import.events as events
 
         monkeypatch.setattr(
             events, "_post_webhook", lambda url, e, timeout=5.0: delivered.append(e.id)
@@ -205,7 +205,7 @@ class TestEventDeliveryFailure:
         get_settings.cache_clear()
         current = get_settings()
 
-        import app.services.events as events
+        import app.modules.lead_import.events as events
 
         monkeypatch.setattr(events, "_post_webhook", lambda url, e, timeout=5.0: (_ for _ in ()).throw(ConnectionError("down")))
         self._create_lead(client)  # delivery pass 1 (in-request)

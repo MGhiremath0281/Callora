@@ -145,12 +145,52 @@ All errors share one envelope:
 | `EVENT_PUBLISH_MAX_ATTEMPTS` | `5` | Delivery attempts before `failed` |
 | `LOG_LEVEL` / `DEBUG` | `INFO` / `false` | Structured JSON logs; `debug` re-raises masked 500s |
 
+### Project structure
+
+```
+backend/app/
+├── main.py                 # FastAPI app, router registration
+├── config.py               # CALLORA_-prefixed settings
+├── models.py               # SQLAlchemy models (leads, imports, outbox, ...)
+├── auth.py / errors.py / logging_config.py
+├── db/                     # engine, sessions, declarative base
+├── api/                    # HTTP layer only (leads.py, imports.py)
+└── modules/
+    ├── lead_import/        # Module 1: schemas, service, validators,
+    │                       #          normalizer, mapping, dedup, events
+    └── crm_sync/           # Module 2: external CRM synchronization
+```
+
+Every lead creation mechanism (CSV upload, JSON API) resolves to one
+standardized output schema — `LeadRead` in
+`app/modules/lead_import/schemas.py`:
+
+```json
+{
+  "id": "lead_6d2c8499a1d44681",
+  "business_id": "biz_001",
+  "name": "Rahul Sharma",
+  "phone": "9876543210",
+  "email": "rahul.test@example.com",
+  "source": "99acres",
+  "language": "english",
+  "deal_value": "7500000.00",
+  "last_contact_at": null,
+  "custom_fields": {"property_type": "Apartment", "city": "Bengaluru"},
+  "external_id": null,
+  "created_at": "2026-10-18T18:17:27.814533"
+}
+```
+
+`phone` is always a string and `deal_value` always a decimal string with
+two fractional digits. This is the contract downstream modules consume.
+
 ### Tests
 
 ```bash
 cd backend
 pip install -r requirements.txt
-pytest tests -q        # 105 tests: unit, API, integration, failure handling
+pytest tests -q        # 114 tests: unit, API, integration, failure handling, schema verification
 ```
 
 Tests run on an isolated SQLite database per test (models use portable

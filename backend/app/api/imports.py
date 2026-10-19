@@ -36,14 +36,14 @@ from app.db.session import get_db, session_scope
 from app.errors import ImportNotFoundError, ImportProcessingError, MalformedFileError
 from app.logging_config import bind_context, get_logger
 from app.models import IdempotencyKey, ImportBatch, ImportRowError
-from app.schemas.imports import (
+from app.modules.lead_import import service as importer_service
+from app.modules.lead_import.schemas import (
     ImportErrorListResponse,
     ImportErrorModel,
     ImportPreviewResponse,
     ImportStatusResponse,
     ImportSummary,
 )
-from app.services import importer as importer_service
 
 logger = get_logger(__name__)
 

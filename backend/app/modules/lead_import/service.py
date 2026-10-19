@@ -26,17 +26,17 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.logging_config import get_logger
 from app.models import ImportBatch, ImportRowError, ImportStatus, Lead
-from app.services import events as events_service
-from app.services.dedup import DuplicateChecker
-from app.services.mapping import (
+from app.modules.lead_import import events as events_service
+from app.modules.lead_import.dedup import DuplicateChecker
+from app.modules.lead_import.mapping import (
     MappingSuggestion,
     build_row_values,
     detect_mappings,
     merge_first_last_name,
     resolve_mappings,
 )
-from app.services.normalization import normalize_header
-from app.services.validation import RowValidationError, validate_row
+from app.modules.lead_import.normalizer import normalize_header
+from app.modules.lead_import.validators import RowValidationError, validate_row
 
 logger = get_logger(__name__)
 
@@ -126,7 +126,7 @@ def detect_preview(columns: List[str]) -> Tuple[List[MappingSuggestion], Dict[st
     return suggestions, resolved
 
 
-def _apply_custom_field_policy(
+def apply_custom_field_policy(
     custom_fields: Dict[str, Any], settings: Settings
 ) -> Dict[str, Any]:
     allowlist = set(settings.custom_field_allowlist_set)
@@ -159,7 +159,7 @@ def build_preview(
 
     for index, row in enumerate(parsed.rows, start=2):  # row 1 is the header
         mapped = build_row_values(row, final_mapping)
-        mapped["custom_fields"] = _apply_custom_field_policy(
+        mapped["custom_fields"] = apply_custom_field_policy(
             mapped.get("custom_fields") or {}, settings
         )
         validated = validate_row(mapped, settings)
@@ -283,7 +283,7 @@ def process_import(
     try:
         for index, row in enumerate(parsed.rows, start=2):  # row 1 is the header
             mapped = build_row_values(row, final_mapping)
-            mapped["custom_fields"] = _apply_custom_field_policy(
+            mapped["custom_fields"] = apply_custom_field_policy(
                 mapped.get("custom_fields") or {}, settings
             )
             validated = validate_row(mapped, settings)

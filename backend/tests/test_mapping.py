@@ -1,6 +1,6 @@
 """Unit tests for automatic column mapping."""
 
-from app.services.mapping import (
+from app.modules.lead_import.mapping import (
     build_row_values,
     detect_mappings,
     merge_first_last_name,
