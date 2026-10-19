@@ -15,9 +15,11 @@ def upload(client, csv_bytes: bytes, headers: dict, filename: str = "leads.csv",
     if mappings is not None:
         import json
 
-        data["mappings"] = json.dumps(mappings)
+        # If mappings is already a string, pass it through as-is (it's raw JSON).
+        # If it's a dict, serialize it.
+        data["mappings"] = mappings if isinstance(mappings, str) else json.dumps(mappings)
     return client.post(
-        "/leads/import",
+        "/api/v1/leads/import",
         files={"file": (filename, csv_bytes, "text/csv")},
         data=data,
         headers=headers,
