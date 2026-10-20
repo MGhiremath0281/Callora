@@ -1,0 +1,20 @@
+# Ruff configuration for the Callora backend.
+#
+# The rule set is intentionally limited to genuine correctness problems
+# (syntax-adjacent errors, undefined names that signal real bugs, invalid
+# format strings, etc.). It is NOT a style/formatter gate, so enabling it
+# requires no changes to the existing application code.
+target-version = "py312"
+line-length = 100
+
+[lint]
+select = [
+    "E9",  # syntax / runtime errors
+    "F",   # pyflakes: undefined names, redefinitions, invalid format strings.
+           # Unused-import/local checks (F401/F841) are excluded so the gate
+           # stays non-invasive for existing code.
+]
+ignore = ["F401", "F841"]
+
+[lint.per-file-ignores]
+"alembic/versions/*.py" = ["F"]  # generated migration files
