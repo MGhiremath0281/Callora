@@ -121,6 +121,23 @@ class TestDetectSignals:
             naive, NOW, POLICY, DetectionContext()
         )
 
+    def test_recovered_status_emits_is_recovered_signal(self):
+        signals = [s["signal"] for s in detect_signals(
+            make_lead(status="Recovered"), NOW, POLICY, DetectionContext()
+        )]
+        assert "is_recovered" in signals
+
+    def test_recovered_flag_emits_is_recovered_signal(self):
+        signals = [s["signal"] for s in detect_signals(
+            make_lead(custom_fields={"is_recovered": True}), NOW, POLICY, DetectionContext()
+        )]
+        assert "is_recovered" in signals
+
+    def test_healthy_open_lead_has_no_is_recovered_signal(self):
+        assert "is_recovered" not in [
+            s["signal"] for s in detect_signals(make_lead(), NOW, POLICY, DetectionContext())
+        ]
+
 
 class TestRecoverability:
     def test_high_value_orders_first(self):
