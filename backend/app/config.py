@@ -102,6 +102,42 @@ class Settings(BaseSettings):
     recovery_fetch_page_size: int = Field(default=200, ge=1, le=500)
     recovery_fetch_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
 
+    # --- Module 3 — deterministic ELIGIBILITY rules ----------------------
+    # The eligibility gate runs BEFORE scoring/recommendation and only
+    # admits opportunities that are provably recoverable. All of these
+    # default to the existing business behaviour ("do not invent rules"):
+    # a phone is the only contact channel the engine can actually use, and
+    # an unknown/missing phone must never be treated as eligibility
+    # evidence — that is the production defect this gate fixes.
+    #
+    # Canonical global recontact suppression (in addition to the per-lead
+    # ``custom_fields.opt_out`` / ``opted_out`` flags already honoured by
+    # the detector). Comma separated. This is business *configuration*,
+    # not a hardcoded rule: the column/flag names come from the existing
+    # import mapping (``Do Not Contact`` → ``do_not_contact``).
+    recovery_opt_out_flags: str = "opt_out,opted_out,do_not_contact,dnc,unsubscribed,suppressed"
+    # A lead whose canonical status already IS the recovery end-state is
+    # not an opportunity to recover. Matched case-insensitively against
+    # ``status`` only when ``is_recovered`` is absent (an explicit flag is
+    # always honoured first).
+    recovery_recovered_statuses: str = "recovered"
+    # Statuses that an operator has closed out of recovery. Such leads are
+    # not re-opened by a later sweep — they are *ignored* (no signal, no
+    # candidate, no case), so any persisted case keeps its lifecycle.
+    recovery_ignored_statuses: str = "dismissed,suppressed,resolved,completed,in_recovery"
+
+    @property
+    def recovery_opt_out_flag_set(self) -> set[str]:
+        return {f.strip().lower() for f in self.recovery_opt_out_flags.split(",") if f.strip()}
+
+    @property
+    def recovery_recovered_status_set(self) -> set[str]:
+        return {s.strip().lower() for s in self.recovery_recovered_statuses.split(",") if s.strip()}
+
+    @property
+    def recovery_ignored_status_set(self) -> set[str]:
+        return {s.strip().lower() for s in self.recovery_ignored_statuses.split(",") if s.strip()}
+
     # --- LLM (Recovery Strategist) ---------------------------------------
     # Optional: when no key is configured the strategist degrades to the
     # deterministic rules-fallback planner and the sweep still completes.
