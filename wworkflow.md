@@ -998,3 +998,86 @@ Manual check against a running backend: import `sample.csv`, run the
 sweep (`POST /api/v1/agent/recovery/run`), then read
 `GET /api/v1/agent/recovery/cases` — items arrive in priority order
 with full breakdowns, and the `ranking` block summarizes the run.
+
+
+---
+
+## 9. Part E — Recovery Dashboard (Modules 1-5 + AI Outreach)
+
+The Recovery Dashboard is an operator-facing surface built on top of the existing recovery pipeline. **No Modules 1-5 behavior was changed**; the dashboard reuses their cases, priority scores, eligibility rules, and the existing Groq configuration. It adds no duplicate lead/recovery-case storage.
+
+### New API routes (mounted under `/api/v1`)
+| Method | Route | Purpose |
+|---|--------|---------|
+| GET | `/api/v1/agent/recovery/dashboard/summary` | Dashboard metrics from real data (totals, priority counts, awaiting outreach, outcomes only from persisted execution records) |
+| GET | `/api/v1/agent/recovery/cases` | Ranked recovery cases (extended: `priority_level`, `query`, `needs_human_approval` filters; response includes `total` and `ranking`) |
+| GET | `/api/v1/agent/recovery/cases/{case_id}` | Lead/case details |
+| GET | `/api/v1/agent/recovery/cases/{case_id}/score-breakdown` | Priority score, level, factor breakdown, explanation, ranking reason |
+| GET | `/api/v1/agent/recovery/cases/{case_id}/outreach-content` | Get or generate (on-demand) lead-specific AI/cached outreach pack |
+| POST | `/api/v1/agent/recovery/cases/{case_id}/outreach-content/generate` | Regenerate content (guardrailed, uses existing Groq config, safe fallback) |
+| GET | `/api/v1/agent/recovery/cases/{case_id}/outcomes` | Actual persisted outreach history/execution outcomes (never fabricated) |
+
+All require `X-API-Key` and are business-scoped. Cross-tenant access returns `404` via `LeadNotFoundError`. 
+
+### Priority-ranked table (fields returned)
+`items[]` include: `case_id`, `lead_id`, `lead_name`, `business_id`, `score` (Module 3 recoverability 0-1), `priority_score` (0-100), `priority_rank`, `priority_level`, `score_breakdown`, `scored_at`, `signals`, `route`, `action`, `channel`, `message`, `rationale`, `engine`, `needs_human_approval`, `status`, `created_at`, `updated_at`. Filtering/search/pagination/sorting use the existing priority order.
+
+### Lead details (verified only)
+The dashboard reads verified contact/language/deal/source/status/custom_fields from `agent_leads` (no synthesis). A lead missing from `agent_leads` yields `None` for lead overview fields where appropriate.
+
+### AI-generated call scripts and messages (Groq)
+- **Reuse**: `app.modules.recovery_dashboard.outreach` uses `app.config.Settings` (`GROQ_API_KEY` / `CALLORA_GROQ_MODEL`) and the same `groq` package as the strategist. No new provider, no hardcoded keys.
+- **Generation**: `GET .../outreach-content` generates and caches in `recovery_outreach_content` on first read; `POST .../generate` regenerates with guardrails and increments `generation_count`/records `regenerated_at`. Results are persisted per `(business_id, case_id)`.
+- **Content**: voice-call script (opening lines, conversation flow, responses for interested/busy/callback/not_interested/no_answer, do-not-do), WhatsApp/SMS, email (subject/body), recovery rationale, context used, preferred-language content, quick copy. All derived from verified case+lead data only.
+- **Safety**: prompts treat lead/case blocks as DATA (not instructions), forbid fabricating prior conversations/visits/quotes/preferences/buying intent/offers/discounts; validate output schema; on any Groq error/timeout/malformed response fall back to deterministic template (`engine: rules-fallback`). Content is labeled "draft for agent review only" and explicitly states no call/message was placed.
+- **Guardrails**: regeneration blocks opted-out/suppressed leads, hard-blocked contacts, or leads already recovered/closed to recovery (`409 recovery_outreach_blocked`). 
+- **History**: `content_generated` events written to `recovery_outreach_events` (append-only). Execution events (`call_completed`, `callback_requested`, `message_sent`, `outreach_failed`) are **only** reported if they exist in persisted records — never fabricated.
+
+### New configuration
+Uses existing variables: `GROQ_API_KEY` / `CALLORA_GROQ_API_KEY`, `CALLORA_GROQ_MODEL` (default `openai/gpt-oss-120b`). No new required env vars.
+
+### Database
+New tables (migration `0005_recovery_outreach`): `recovery_outreach_content` (unique per business/case, caches pack + generation metadata), `recovery_outreach_events` (append-only history). No changes to existing tables.
+
+### Startup/run
+Migrations run automatically on startup in compose (`alembic upgrade head`). For local: `cd backend && alembic upgrade head && uvicorn app.main:app --reload`. Groq key optional (rules-fallback).
+
+### Tests added/updated
+- Route registration updated for dashboard routes.
+- Manual verification recommended via TestClient; Groq mocked in tests (no live calls). Existing recovery/priority tests unchanged behavior.
+
+### Remaining limitations
+- No actual telephony or WhatsApp/SMS/email sending is implemented. Only content generation and persisted history are tracked.
+- Outcomes dashboard shows zeros unless real execution events are recorded by a future ACT stage.
+- "Lead details" rely on `agent_leads` projection; if a lead projection is missing, only case data is shown (never synthesized).
+- Groq output is best-effort and always falls back to deterministic content on failure.
+
+
+### Full API route listing (current)
+```
+GET  /api/v1/agent/leads
+GET  /api/v1/agent/leads/by-external/{external_crm_id}
+GET  /api/v1/agent/leads/{lead_id}
+GET  /api/v1/agent/recovery/cases
+GET  /api/v1/agent/recovery/cases/{case_id}
+GET  /api/v1/agent/recovery/cases/{case_id}/outcomes
+GET  /api/v1/agent/recovery/cases/{case_id}/outreach-content
+POST /api/v1/agent/recovery/cases/{case_id}/outreach-content/generate
+GET  /api/v1/agent/recovery/cases/{case_id}/score-breakdown
+GET  /api/v1/agent/recovery/dashboard/summary
+POST /api/v1/agent/recovery/run
+GET  /api/v1/crm/connections
+POST /api/v1/crm/connections
+POST /api/v1/crm/sync
+GET  /api/v1/imports/{import_id}
+GET  /api/v1/imports/{import_id}/errors
+GET  /api/v1/leads
+POST /api/v1/leads
+POST /api/v1/leads/import
+GET  /api/v1/leads/{lead_id}
+```
+
+### Summary
+- Recovery dashboard routes added: summary, cases (filtered/paginated/searchable), case get, score-breakdown, outreach-content (get/generate), outcomes. All business-scoped, use existing Groq config, no live calls required in tests, no fabrication, no telephony.
+- Database: `recovery_outreach_content`, `recovery_outreach_events` (migration `0005_recovery_outreach`).
+- 427 tests passed (including route registration updated); ruff clean.
