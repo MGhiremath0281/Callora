@@ -75,6 +75,11 @@ Infrastructure (kept, outside the allowlist): `GET /`, `GET /health`, `/docs`.
 response fields and `GET /api/v1/agent/recovery/cases`. The allowlist is
 still exactly 15 routes.
 
+**Module 5 (Priority Scoring) also added no routes** — ranking runs
+*inside* the same sweep, persists on the same `recovery_cases` rows, and
+is exposed through backward-compatible extensions of the two recovery
+endpoints (see Part D). The allowlist is still exactly 15 routes.
+
 **All routes live under `/api/v1` exactly once.** There are no unversioned
 aliases (`/leads`, `/imports/...`) and no `/leads/import/preview` endpoint.
 
@@ -579,7 +584,7 @@ cd backend
 python3 -m pytest tests/ -q
 ```
 
-**Expected: `357 passed`** (plus 1 upstream Starlette deprecation warning).
+**Expected: `427 passed`** (plus 1 upstream Starlette deprecation warning).
 
 Coverage map:
 
@@ -599,6 +604,8 @@ Coverage map:
 | Deterministic eligibility gate: status, consent, contact validity, recovery evidence, previous outcome, operator-closed, CRM-drift evidence | `test_recovery_eligibility.py` (67 tests) |
 | Eligibility counted in the run summary (`skipped_inactive` / `skipped_invalid`) | `test_recovery_eligibility.py::TestEligibilityCounts` |
 | Duplicate-safe case persistence: stable `case_id`/`created_at`, no re-open, unique-constraint race | `test_recovery_eligibility.py::TestCasePersistence` |
+| Priority scoring: normalization, boundaries, level thresholds, factor math, missing data, determinism | `test_priority_scoring.py` (pure-engine tests) |
+| Priority ranking end-to-end: ordering, tie-breaking, de-ranking ineligible leads, recalculation, pagination, isolation, backward compatibility | `test_priority_scoring.py` (API tests) |
 | CRM connection configuration & validation | `test_crm_connections.py` |
 | CRM Connections listing endpoint | `test_crm_sync.py::TestCRMConnectionsEndpoint` |
 | Manual CRM synchronization | `test_crm_sync.py` |
@@ -739,12 +746,23 @@ curl -s "$BASE/api/v1/agent/recovery/cases" -H "$H"
 curl -s "$BASE/api/v1/agent/recovery/cases/$CASE_ID" -H "$H"
 ```
 
-**Verified — HTTP 200** (abridged; ordered by score, newest signal first):
+**Verified — HTTP 200** (abridged; ordered by Module 5 priority score
+desc — recoverability `score` desc and `case_id` asc are the stable
+tie-breaks; unscored rows sink last):
 
 ```json
 { "items": [
     { "case_id": "case_106d5fed06ee4886", "lead_id": "lead_80d41b65cab84d40",
       "lead_name": "Kavya Rao", "business_id": "biz_001", "score": 0.95,
+      "priority_score": 80.0, "priority_rank": 1, "priority_level": "critical",
+      "score_breakdown": { "factors": [ { "factor": "business_value", "points": 30.0,
+                                          "max_points": 30.0,
+                                          "evidence": "deal_value 18000000 = 100% of reference 10000000" },
+                                        { "factor": "urgency", "points": 25.0, "max_points": 25.0,
+                                          "evidence": "…" } ],
+                           "explanation": "priority 80/100 (critical): business_value 30/30 (…); …",
+                           "weights": { "business_value": 30.0, "urgency": 25.0, "…" : "…" } },
+      "scored_at": "2026-10-20T06:35:37.933739",
       "signals": [ { "signal": "never_contacted", "severity": "high",
                      "detail": "no contact 2 min after creation (SLA 1 min)" } ],
       "route": "llm", "action": "re_contact_lead", "channel": "sms",
@@ -752,7 +770,11 @@ curl -s "$BASE/api/v1/agent/recovery/cases/$CASE_ID" -H "$H"
       "rationale": "deterministic fallback policy", "engine": "rules-fallback",
       "needs_human_approval": false, "status": "recommended",
       "created_at": "2026-10-20T06:35:37.933739", "updated_at": "…" }, … ],
-  "business_id": "biz_001", "limit": 50, "offset": 0 }
+  "business_id": "biz_001", "limit": 50, "offset": 0,
+  "ranking": { "total_scored": 6,
+               "levels": { "critical": 1, "high": 2, "medium": 2, "low": 1 },
+               "order": "priority_score desc, score desc, case_id asc",
+               "scored_at": "2026-10-20T06:35:37.933739" } }
 ```
 
 | Follow-up check | Verified result |
@@ -781,3 +803,198 @@ curl -s "$BASE/api/v1/agent/recovery/cases/$CASE_ID" -H "$H"
 | `CALLORA_RECOVERY_API_BASE_URL` | unset | unset = fetch leads in-process via ASGI (same API contract); set to fetch over HTTP |
 | `GROQ_API_KEY` | unset | enables the LLM strategist; unset = rules-fallback |
 | `CALLORA_GROQ_MODEL` | `openai/gpt-oss-120b` | Groq model id |
+
+### Module 5 configuration (priority scoring)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CALLORA_PRIORITY_WEIGHT_BUSINESS_VALUE` | `30` | weight of the deal-value factor |
+| `CALLORA_PRIORITY_WEIGHT_URGENCY` | `25` | weight of the SLA/stall-breach factor |
+| `CALLORA_PRIORITY_WEIGHT_INTENT` | `20` | weight of the buying-intent factor |
+| `CALLORA_PRIORITY_WEIGHT_RECOVERY_POTENTIAL` | `15` | weight of the signal-severity factor |
+| `CALLORA_PRIORITY_WEIGHT_CONTACTABILITY` | `10` | weight of the contact-data factor |
+| `CALLORA_PRIORITY_DEAL_VALUE_REFERENCE` | `10000000` | deal value that reaches full business-value points |
+| `CALLORA_PRIORITY_URGENCY_FULL_BREACH_MINUTES` | `10080` | minutes beyond SLA that reach full urgency points |
+| `CALLORA_PRIORITY_URGENCY_FULL_STALL_DAYS` | `30` | days beyond the stall window that reach full urgency points |
+| `CALLORA_PRIORITY_INTENT_FLAGS` | *(empty)* | comma-separated `custom_fields` flags counted as intent evidence |
+| `CALLORA_PRIORITY_LEVEL_CRITICAL_MIN` | `80` | score ≥ this → `critical` |
+| `CALLORA_PRIORITY_LEVEL_HIGH_MIN` | `60` | score ≥ this → `high` |
+| `CALLORA_PRIORITY_LEVEL_MEDIUM_MIN` | `40` | score ≥ this → `medium`, else `low` |
+
+Weights are normalized (they need not sum to 100): each factor
+contributes `weight × ratio`, and the total is
+`100 × Σ(weight × ratio) / Σweight` — so re-weighting can never push a
+score outside 0..100.
+
+---
+
+## 4D. Part D — Module 5: Priority Scoring
+
+### Responsibilities
+
+Module 5 **ranks the eligible recovery cases** Modules 3/4 already
+produced. It answers one question — *which neglected lead should the
+team touch first* — with a normalized **0–100 priority score**, a
+**priority level** (`critical` / `high` / `medium` / `low`), a
+**rank** and a per-factor **score breakdown** that explains every point.
+
+Like the eligibility engine, it **added no routes and no tables**: it
+runs *inside* the existing `POST /api/v1/agent/recovery/run` sweep,
+persists on the existing `recovery_cases` rows (migration `0004` only
+adds nullable columns), and is read through the existing
+`GET /api/v1/agent/recovery/cases` endpoints with backward-compatible
+extensions. The allowlist is still exactly 15 routes.
+
+**Separation of concerns is strict:**
+
+- Module 4 (eligibility) decides **whether** a lead may be recovered.
+  Module 5 only **ranks** cases that passed the gate. A high priority
+  score can never override an eligibility failure, an opt-out, invalid
+  contact details or a required approval.
+- Before ranking, the gate is **re-verified with Module 4's own
+  function** against current lead data: a case whose lead opted out or
+  was recovered *after* case creation is dropped from the ranked set
+  (its stale priority fields are cleared) — it is never reintroduced.
+- Cases that advanced into the ACT/HITL lifecycle
+  (`in_recovery`/`recovered`/`exhausted`/`archived`) are never
+  re-scored or re-ranked — same rule the sweep already applies.
+- No LLM produces any number here. Every factor is deterministic math
+  over stored fields; equal inputs always yield equal scores.
+
+### The scoring formula and default weights
+
+```
+priority = 100 × Σ(weight_f × ratio_f) / Σ(weight_f)          (0..100)
+```
+
+| Factor | Default weight | Ratio (0..1) computed from | Missing data → |
+|---|---|---|---|
+| `business_value` | **30** | `deal_value` vs. `CALLORA_PRIORITY_DEAL_VALUE_REFERENCE` (default Rs.10M — the same reference the recoverability score uses), capped at 1.0 | 0 — a missing deal value is **never** read as value |
+| `urgency` | **25** | verified time beyond the follow-up SLA (`never_contacted`) or stall window (`stalled_follow_up`), scaled to full points at `…FULL_BREACH_MINUTES` / `…FULL_STALL_DAYS`; the worse of the two counts | 0 — a signal with an unknown timestamp is not time evidence |
+| `buying_intent` | **20** | 0.5 for a recorded prior contact (`last_contact_at`) + 0.5 for any configured `CALLORA_PRIORITY_INTENT_FLAGS` flag truthily set in `custom_fields` | 0 — intent is never assumed from missing data; default flags list is **empty** so nothing is invented |
+| `recovery_potential` | **15** | severity of the signals already verified on the case (high 1.0 / medium 0.7 / low 0.4 — the same mapping the recoverability score uses; unknown severity counts as low) | 0 — no signals, no points |
+| `contactability` | **10** | 0.6 usable phone + 0.2 usable email + 0.2 recorded language, from the canonical lead record | absent fields simply add nothing; blank values never count |
+
+**Assumptions behind the defaults** (all configurable): deal size is
+the strongest single reason to call one lead before another; how long
+the SLA has been breached drives time-sensitivity; recorded engagement
+predicts conversion; stronger verified signals mean a more actionable
+opportunity; a reachable, language-known lead is worth more than an
+unreachable one. Weights are normalized, so any re-weighting keeps
+scores inside 0..100.
+
+### Priority thresholds
+
+`critical` ≥ 80 > `high` ≥ 60 > `medium` ≥ 40 > `low` — configurable
+via `CALLORA_PRIORITY_LEVEL_*_MIN`.
+
+### Missing-data handling
+
+Missing deal value, intent, timestamps, or contact fields each earn
+**zero points for that factor** and are named explicitly in the
+factor's `evidence` string (e.g. `"deal_value missing — no points
+awarded"`). Nothing is fabricated: no invented deal values, intent,
+conversion probabilities or contact details — scores come only from
+stored lead fields and the persisted, verified recovery signals.
+
+### The score breakdown format
+
+Persisted per case in `recovery_cases.score_breakdown` and returned by
+the API:
+
+```json
+{
+  "factors": [
+    { "factor": "business_value",   "points": 30.0, "max_points": 30.0,
+      "evidence": "deal_value 12000000 = 100% of reference 10000000" },
+    { "factor": "urgency",          "points": 25.0, "max_points": 25.0,
+      "evidence": "never_contacted: 43080 min beyond 120 min SLA (full points at 10080 min)" },
+    { "factor": "buying_intent",    "points": 0.0,  "max_points": 20.0,
+      "evidence": "no prior contact recorded; no configured intent flag set" },
+    { "factor": "recovery_potential","points": 15.0, "max_points": 15.0,
+      "evidence": "signals: never_contacted (high)" },
+    { "factor": "contactability",   "points": 10.0, "max_points": 10.0,
+      "evidence": "phone available; email available; language hindi" }
+  ],
+  "explanation": "priority 80/100 (critical): business_value 30/30 (…); buying_intent 0/20 (…); …",
+  "weights": { "business_value": 30.0, "urgency": 25.0, "buying_intent": 20.0,
+               "recovery_potential": 15.0, "contactability": 10.0 }
+}
+```
+
+Factor points always sum exactly to `priority_score` (per-factor
+rounding to 2 decimals), so every score is auditable to the cent.
+
+### How cases are ranked and persisted
+
+- Scoring runs at the **end of every sweep**, inside the same
+  transaction as the case upserts — cases and ranks commit (or roll
+  back) together. Repeated runs are idempotent: unchanged inputs
+  reproduce identical scores, ranks and breakdowns.
+- Fresh lead data is read from `agent_leads` at scoring time, so a
+  changed deal value or contact detail is **recalculated on the next
+  sweep**.
+- Ranking is **scoped per business** and ordered by
+  `priority_score desc, score desc, case_id asc` — deterministic
+  tie-breaking, stable pagination.
+- New nullable columns on `recovery_cases` (migration
+  `alembic/versions/0004_priority_scoring.py`):
+  `priority_score` (Numeric 5,2), `priority_rank`, `priority_level`,
+  `score_breakdown` (JSON), `scored_at`, plus index
+  `ix_recovery_cases_business_priority`. The existing `score` column
+  keeps its Module 3 meaning (0..1 recoverability) — unchanged.
+- The sweep response gains a `priority` block:
+  `{ "scored": N, "deranked_ineligible": N, "levels": {…},
+     "order": "…", "scored_at": "…" }`.
+
+### API changes and sample output
+
+No new routes. `GET /api/v1/agent/recovery/cases` items gain additive
+fields `priority_score`, `priority_rank`, `priority_level`,
+`score_breakdown`, `scored_at` (all `null` for cases never ranked,
+e.g. pre-migration rows before the next sweep), and the envelope gains
+a `ranking` metadata block (see the verified Step 9 response above).
+`GET /api/v1/agent/recovery/cases/{case_id}` carries the same item
+fields. Every previously documented field and its meaning is preserved.
+
+### Dashboard & Voice Calling consumption (future modules)
+
+The dashboard can render directly from the cases API: total eligible
+cases (`ranking.total_scored`), priority distribution
+(`ranking.levels`), ranked leads (items ordered by `priority_rank`),
+per-lead score + level + factor breakdown + `explanation`, the
+existing recommended `action`/`channel`/`message` and the existing
+`needs_human_approval` and `status` — no new aggregation endpoint
+required. The future Voice Calling agent (Module 6) can pull the top
+`critical`/`high` case and already receives the lead context, recovery
+signals and approval requirements it needs in the same payload;
+verified contact details (`phone`, `email`, `language`) come from the
+canonical lead records (`GET /api/v1/agent/leads/{lead_id}`) — they
+are **not** duplicated into recovery cases.
+
+**Not implemented here (separate future responsibilities):** the
+dashboard itself, placing calls, sending WhatsApp/SMS/email, and the
+ACT stage workflow.
+
+### Verify the implementation
+
+```bash
+cd backend
+
+# Module 5 in isolation — pure engine + end-to-end ranking (50 tests)
+python3 -m pytest tests/test_priority_scoring.py -q
+
+# Regression: existing recovery detection / eligibility / resilience
+python3 -m pytest tests/test_recovery_api.py tests/test_recovery_eligibility.py \
+                 tests/test_recovery_detect.py tests/test_recovery_engine.py \
+                 tests/test_recovery_resilience.py -q
+
+# Full suite (expected: 427 passed) + lint
+python3 -m pytest tests/ -q
+python3 -m ruff check app tests alembic
+```
+
+Manual check against a running backend: import `sample.csv`, run the
+sweep (`POST /api/v1/agent/recovery/run`), then read
+`GET /api/v1/agent/recovery/cases` — items arrive in priority order
+with full breakdowns, and the `ranking` block summarizes the run.

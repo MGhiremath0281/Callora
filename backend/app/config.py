@@ -126,9 +126,56 @@ class Settings(BaseSettings):
     # candidate, no case), so any persisted case keeps its lifecycle.
     recovery_ignored_statuses: str = "dismissed,suppressed,resolved,completed,in_recovery"
 
+    # --- Module 5 — Priority Scoring -------------------------------------
+    # Deterministic ranking of the *eligible* recovery cases produced by
+    # Modules 3/4. Scoring never re-runs eligibility: it consumes cases
+    # that already passed the gate and ranks them by expected business
+    # value of acting now. No LLM is involved in any number produced
+    # here — every factor is computed from stored lead data and the
+    # verified recovery signals already persisted on the case.
+    #
+    # Default weights (assumptions documented in wworkflow.md):
+    #   business value 30 — deal size dominates "who to call first";
+    #   urgency 25       — SLA breach magnitude drives time-sensitivity;
+    #   buying intent 20 — evidence of engagement converts better;
+    #   recovery potential 15 — strength of the detected opportunity;
+    #   contactability 10 — a reachable lead is worth more than an
+    #                        unreachable one at equal everything else.
+    # Weights are normalized (they need not sum to 100); each factor
+    # contributes weight × ratio, total = 100 × Σ/Σweights.
+    priority_weight_business_value: float = Field(default=30.0, ge=0.0)
+    priority_weight_urgency: float = Field(default=25.0, ge=0.0)
+    priority_weight_intent: float = Field(default=20.0, ge=0.0)
+    priority_weight_recovery_potential: float = Field(default=15.0, ge=0.0)
+    priority_weight_contactability: float = Field(default=10.0, ge=0.0)
+    # Deal value at which the business-value factor reaches full points
+    # (same reference the recoverability score already uses, so the two
+    # stay comparable). Missing/unknown deal value scores 0 — it is
+    # never treated as evidence of value.
+    priority_deal_value_reference: float = Field(default=10_000_000.0, gt=0.0)
+    # Time beyond the SLA / stall window at which urgency reaches full
+    # points (defaults: 7 days beyond SLA, 30 days of stall).
+    priority_urgency_full_breach_minutes: int = Field(default=10_080, ge=1)
+    priority_urgency_full_stall_days: int = Field(default=30, ge=1)
+    # Optional custom_fields flags (comma separated, truthy) that count
+    # as buying-intent evidence (e.g. "budget_confirmed,site_visit").
+    # Empty by default: Callora must not assume intent the data does
+    # not carry. Prior recorded contact counts as engagement regardless.
+    priority_intent_flags: str = ""
+    # Priority level thresholds (score >= threshold). critical >= 80,
+    # high >= 60, medium >= 40, low below that — configurable so a
+    # business can tune triage without code changes.
+    priority_level_critical_min: float = Field(default=80.0, ge=0.0, le=100.0)
+    priority_level_high_min: float = Field(default=60.0, ge=0.0, le=100.0)
+    priority_level_medium_min: float = Field(default=40.0, ge=0.0, le=100.0)
+
     @property
     def recovery_opt_out_flag_set(self) -> set[str]:
         return {f.strip().lower() for f in self.recovery_opt_out_flags.split(",") if f.strip()}
+
+    @property
+    def priority_intent_flag_set(self) -> set[str]:
+        return {f.strip().lower() for f in self.priority_intent_flags.split(",") if f.strip()}
 
     @property
     def recovery_recovered_status_set(self) -> set[str]:

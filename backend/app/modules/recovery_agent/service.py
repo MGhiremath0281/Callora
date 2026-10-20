@@ -1,12 +1,17 @@
 """Module 3 pipeline orchestration — the recovery sweep.
 
     fetch → dedupe → existing-case guard → detect → eligibility →
-    assess → guardrails/decide → store
+    assess → guardrails/decide → store → prioritize (Module 5)
 
 The engine is synchronous and takes the already-fetched leads, so it is
 unit-testable without HTTP; the router performs the async fetch and runs
 this in a worker thread. Every stage is deterministic except the
 Strategist, which degrades to rules without an LLM key.
+
+After the cases are stored, Module 5 (Priority Scoring) ranks the open
+(``recommended``) cases of the business — deterministic, no LLM, and
+strictly downstream of eligibility: it can never reintroduce a lead the
+gate excluded.
 """
 
 import logging
@@ -42,7 +47,8 @@ from app.modules.recovery_agent.eligibility import (
 )
 from app.modules.recovery_agent.guardrails import hard_block, route
 from app.modules.recovery_agent.policy import eligibility_config
-from app.modules.recovery_agent.repository import upsert_case
+from app.modules.recovery_agent.priority import PRIORITY_LEVELS, priority_config
+from app.modules.recovery_agent.repository import RANKING_ORDER, rank_open_cases, upsert_case
 from app.modules.recovery_agent.strategist import llm_available, strategize
 
 logger = logging.getLogger("callora.recovery.sweep")
@@ -280,6 +286,30 @@ def run_recovery_engine(
 
     # ``db.commit()`` — the same call the sweep has always made, kept
     # here so a commit failure is reported (never silently swallowed).
+
+    # --- MODULE 5: PRIORITY SCORING (deterministic, no LLM) ------------
+    # Rank the open (recommended) cases of this business. Runs inside
+    # the same transaction so cases and ranks commit together; ranking
+    # consumes only cases that already passed the eligibility gate and
+    # can never resurrect an excluded lead. A scoring failure is
+    # reported (``scored: 0``), never silently swallowed — and never
+    # takes the sweep result down with it.
+    try:
+        priority_result = rank_open_cases(
+            db,
+            business_id,
+            policy,
+            priority_config(settings),
+            now,
+            gate_config=config,
+        )
+    except Exception:  # noqa: BLE001 - scoring must not lose the sweep
+        logger.exception(
+            "priority_scoring_failed",
+            extra={"business_id": business_id},
+        )
+        priority_result = _empty_priority_result()
+
     committed = _commit_safely(db)
     # Truthful recount: the unique-violation fallback inside
     # ``upsert_case`` rolls back the whole transaction, so a persisted
@@ -288,6 +318,9 @@ def run_recovery_engine(
     summary["cases_upserted"] = (
         _count_persisted_cases(db, business_id, candidates) if committed else 0
     )
+    # The ranking is only real if the transaction that carried it
+    # committed — same honesty rule as ``cases_upserted``.
+    summary["priority"] = priority_result if committed else _empty_priority_result()
 
     logger.info(
         "recovery_sweep_completed",
@@ -324,6 +357,17 @@ def _log_exclusion(
             "detail": detail,
         },
     )
+
+
+def _empty_priority_result() -> Dict[str, Any]:
+    """Honest zero-state when ranking did not persist (failure/rollback)."""
+    return {
+        "scored": 0,
+        "deranked_ineligible": 0,
+        "levels": {level: 0 for level in PRIORITY_LEVELS},
+        "order": RANKING_ORDER,
+        "scored_at": None,
+    }
 
 
 def _rollback_safely(db: Session) -> None:

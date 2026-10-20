@@ -52,6 +52,15 @@ def _case_payload(case: RecoveryCase) -> Dict[str, Any]:
         "lead_name": case.lead_name,
         "business_id": case.business_id,
         "score": float(case.score) if case.score is not None else None,
+        # Module 5 (Priority Scoring) — additive fields; the existing
+        # ``score`` above keeps its Module 3 recoverability meaning.
+        "priority_score": (
+            float(case.priority_score) if case.priority_score is not None else None
+        ),
+        "priority_rank": case.priority_rank,
+        "priority_level": case.priority_level,
+        "score_breakdown": case.score_breakdown,
+        "scored_at": case.scored_at.isoformat() if case.scored_at else None,
         "signals": case.signals,
         "route": case.route,
         "action": case.action,
@@ -97,7 +106,13 @@ async def list_recovery_cases(
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """List stored recovery cases (downstream hand-off surface)."""
+    """List stored recovery cases in priority order (hand-off surface).
+
+    Items are ranked by Module 5 (priority score desc, recoverability
+    score desc, case id asc) and carry additive ``priority_*`` /
+    ``score_breakdown`` fields. The ``ranking`` block summarizes ALL
+    scored cases of the business (not just the current page).
+    """
     business_id, _ = credentials
     cases = repository.list_cases(db, business_id, case_status, limit, offset)
     return {
@@ -105,6 +120,7 @@ async def list_recovery_cases(
         "business_id": business_id,
         "limit": limit,
         "offset": offset,
+        "ranking": repository.priority_summary(db, business_id),
     }
 
 

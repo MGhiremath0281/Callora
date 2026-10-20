@@ -312,6 +312,7 @@ class RecoveryCase(Base):
     __table_args__ = (
         Index("ix_recovery_cases_business", "business_id"),
         Index("ix_recovery_cases_status", "status"),
+        Index("ix_recovery_cases_business_priority", "business_id", "priority_score"),
         UniqueConstraint("business_id", "lead_id", name="uq_recovery_cases_business_lead"),
     )
 
@@ -321,7 +322,17 @@ class RecoveryCase(Base):
     business_id: Mapped[str] = mapped_column(String(64), nullable=False)
     lead_id: Mapped[str] = mapped_column(String(32), nullable=False)
     lead_name: Mapped[Optional[str]] = mapped_column(String(255))
+    # ``score`` is Module 3's 0..1 recoverability score — its meaning is
+    # frozen. Module 5 (Priority Scoring) adds a separate normalized
+    # 0..100 priority score plus its rank/level/breakdown; the columns
+    # are nullable so existing rows stay valid until the next sweep
+    # scores them.
     score: Mapped[Optional[Decimal]] = mapped_column(Numeric(4, 3))
+    priority_score: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2))
+    priority_rank: Mapped[Optional[int]] = mapped_column(Integer)
+    priority_level: Mapped[Optional[str]] = mapped_column(String(16))
+    score_breakdown: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON)
+    scored_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     signals: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     route: Mapped[Optional[str]] = mapped_column(String(16))
     action: Mapped[Optional[str]] = mapped_column(String(32))
