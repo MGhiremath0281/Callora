@@ -24,4 +24,8 @@ prototype; LLM only where judgment is needed):
                   play and composes the message; rules-fallback without a key
     store       — recovery_cases rows, idempotent per (business, lead);
                   the hand-off surface for downstream components
+    prioritize  — Module 5 (priority.py): deterministic 0..100 priority
+                  score + rank + level + explainable breakdown for every
+                  open (recommended) case; strictly downstream of the
+                  eligibility gate and free of any LLM involvement
 """
