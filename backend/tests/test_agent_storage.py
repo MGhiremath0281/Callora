@@ -319,3 +319,98 @@ class TestAgentAPI:
             headers=auth_headers(BIZ_2),
         )
         assert resp.status_code == 404
+
+
+class TestAgentAPIAuth:
+    """Every agent endpoint requires a valid Callora API key."""
+
+    def test_list_requires_api_key(self, agent_client):
+        assert agent_client.get("/api/v1/agent/leads").status_code == 401
+
+    def test_list_rejects_invalid_api_key(self, agent_client):
+        resp = agent_client.get(
+            "/api/v1/agent/leads", headers={"X-API-Key": "wrong-key"}
+        )
+        assert resp.status_code == 401
+
+    def test_get_by_id_requires_api_key(self, agent_client):
+        resp = agent_client.get("/api/v1/agent/leads/lead_agent00000000001")
+        assert resp.status_code == 401
+
+    def test_get_by_external_requires_api_key(self, agent_client):
+        resp = agent_client.get("/api/v1/agent/leads/by-external/CRM-001")
+        assert resp.status_code == 401
+
+
+class TestAgentAPIPagination:
+    """The list endpoint honours ``limit``/``offset`` for paging."""
+
+    def _seed(self, count: int) -> None:
+        session = get_session_factory()()
+        try:
+            for i in range(count):
+                upsert_agent_lead(
+                    session,
+                    f"lead_page{i:014d}",
+                    BIZ_1,
+                    f"Lead {i}",
+                    f"98765432{i:02d}",
+                    "website",
+                )
+            session.commit()
+        finally:
+            session.close()
+
+    def test_limit_caps_returned_items(self, agent_client):
+        self._seed(5)
+        resp = agent_client.get(
+            "/api/v1/agent/leads?limit=2", headers=auth_headers(BIZ_1)
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["items"]) == 2
+        assert data["limit"] == 2
+        assert data["offset"] == 0
+
+    def test_offset_pages_through_results(self, agent_client):
+        self._seed(3)
+        first = agent_client.get(
+            "/api/v1/agent/leads?limit=2&offset=0", headers=auth_headers(BIZ_1)
+        ).json()
+        second = agent_client.get(
+            "/api/v1/agent/leads?limit=2&offset=2", headers=auth_headers(BIZ_1)
+        ).json()
+        assert len(first["items"]) == 2
+        assert len(second["items"]) == 1
+        # No item is returned on both pages.
+        first_ids = {item["lead_id"] for item in first["items"]}
+        second_ids = {item["lead_id"] for item in second["items"]}
+        assert first_ids.isdisjoint(second_ids)
+
+    def test_limit_must_be_within_bounds(self, agent_client):
+        # limit has ge=1, le=500 — out-of-range values are rejected by FastAPI.
+        assert (
+            agent_client.get(
+                "/api/v1/agent/leads?limit=0", headers=auth_headers(BIZ_1)
+            ).status_code
+            == 422
+        )
+        assert (
+            agent_client.get(
+                "/api/v1/agent/leads?limit=501", headers=auth_headers(BIZ_1)
+            ).status_code
+            == 422
+        )
+
+    def test_negative_offset_rejected(self, agent_client):
+        resp = agent_client.get(
+            "/api/v1/agent/leads?offset=-1", headers=auth_headers(BIZ_1)
+        )
+        assert resp.status_code == 422
+
+    def test_empty_list_for_business_without_leads(self, agent_client):
+        resp = agent_client.get(
+            "/api/v1/agent/leads", headers=auth_headers(BIZ_2)
+        )
+        assert resp.status_code == 200
+        assert resp.json()["items"] == []
