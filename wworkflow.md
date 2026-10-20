@@ -70,6 +70,11 @@ Interactive API docs: `$BASE/docs`
 
 Infrastructure (kept, outside the allowlist): `GET /`, `GET /health`, `/docs`.
 
+**The eligibility engine added no routes** — it runs *inside* the existing
+`POST /api/v1/agent/recovery/run` sweep and is observable through the same
+response fields and `GET /api/v1/agent/recovery/cases`. The allowlist is
+still exactly 15 routes.
+
 **All routes live under `/api/v1` exactly once.** There are no unversioned
 aliases (`/leads`, `/imports/...`) and no `/leads/import/preview` endpoint.
 
@@ -574,7 +579,7 @@ cd backend
 python3 -m pytest tests/ -q
 ```
 
-**Expected: `278 passed`** (plus 1 upstream Starlette deprecation warning).
+**Expected: `357 passed`** (plus 1 upstream Starlette deprecation warning).
 
 Coverage map:
 
@@ -588,9 +593,12 @@ Coverage map:
 | Duplicate prevention & retry/idempotency | `test_crm_sync.py`, `test_dedup.py`, `test_api_leads.py` |
 | Persistence of external CRM IDs & sync results | `test_crm_sync.py`, `test_auto_sync.py` |
 | All 3 Agent Leads endpoints | `test_agent_storage.py`, `test_api_leads.py` |
-| Opportunity signals, scoring, guardrails, strategist fallback | `test_recovery_detect.py` |
-| Recovery sweep, cases API, idempotent re-runs, status filter | `test_recovery_api.py` |
-| Recovery resilience: timeouts, 5xx, malformed payloads, LLM outage | `test_recovery_resilience.py` |
+| Opportunity signals, scoring, guardrails, strategist fallback | `test_recovery_detect.py` (37 tests) |
+| Recovery sweep, cases API, idempotent re-runs, status filter | `test_recovery_api.py` (14 tests) |
+| Recovery resilience: timeouts, 5xx, malformed payloads, LLM outage | `test_recovery_resilience.py` (12 tests) |
+| Deterministic eligibility gate: status, consent, contact validity, recovery evidence, previous outcome, operator-closed, CRM-drift evidence | `test_recovery_eligibility.py` (67 tests) |
+| Eligibility counted in the run summary (`skipped_inactive` / `skipped_invalid`) | `test_recovery_eligibility.py::TestEligibilityCounts` |
+| Duplicate-safe case persistence: stable `case_id`/`created_at`, no re-open, unique-constraint race | `test_recovery_eligibility.py::TestCasePersistence` |
 | CRM connection configuration & validation | `test_crm_connections.py` |
 | CRM Connections listing endpoint | `test_crm_sync.py::TestCRMConnectionsEndpoint` |
 | Manual CRM synchronization | `test_crm_sync.py` |
@@ -614,6 +622,7 @@ Coverage map:
 | Auto-sync "didn't happen" | It runs as a background task right after the response — wait a moment, then re-check; verify `CALLORA_CRM_BASE_URL` and that the connection `is_active` |
 | `502 crm_sync_failed` | Fake CRM not running, wrong URL, or bad credentials — the lead is unaffected |
 | Port confusion | Compose serves `8001`, local uvicorn defaults to `8000` |
+| Lead missing from sweep candidates | It failed the eligibility gate — check `skipped_inactive` (active/converted/recovered/operator-closed) vs `skipped_invalid` (opted out, no usable phone, no recovery evidence) in the run response |
 
 ---
 
@@ -648,6 +657,61 @@ Rules of the engine:
 - Without `GROQ_API_KEY` (or if the LLM errors / returns
   invalid JSON) plans come from the deterministic rules planner —
   `engine` shows which one was used.
+
+### Eligibility gate (runs first, no LLM)
+
+Before any signal, score or recommendation is produced, every lead passes
+a deterministic eligibility gate (`recovery_agent/eligibility.py`). It is
+pure (no database, no external calls) so the same inputs always yield the
+same decision, and it never treats missing/unknown data as eligibility:
+
+| Rule | Excludes when |
+|---|---|
+| Status | status is active/converted/closed → `skipped_inactive` |
+| Previous outcome | status is `recovered` or `custom_fields.is_recovered` → `skipped_inactive` |
+| Operator-closed | status is `dismissed`/`suppressed`/`resolved`/`completed`/`in_recovery` → ignored (case never re-opened) |
+| Consent | a configured opt-out/suppression flag is set → `skipped_invalid` |
+| Contact validity | no usable phone → `skipped_invalid` |
+| Recovery evidence | no verifiable never-contacted/overdue evidence (unknown timestamps) → `skipped_invalid` |
+
+`crm_sync_drift` is only emitted for a lead the CRM module has
+**confirmed** synced (a terminal `created`/`updated` `crm_sync_records`
+row) that has since lost its `external_crm_id`; an unknown CRM status is
+never reported as drift. When no confirmation list exists the legacy
+`crm_configured` gate applies.
+
+### Testing the eligibility gate
+
+The gate is pure, so it can be exercised directly without a database or
+network — and it is also observable through the existing sweep route:
+
+```bash
+cd backend
+# Pure gate: every rule in isolation + determinism + non-mutation
+python3 -m pytest tests/test_recovery_eligibility.py -q
+
+# End-to-end: the gate's effect on the run summary and on persisted cases
+python3 -m pytest tests/test_recovery_eligibility.py::TestEligibilityCounts \
+                 tests/test_recovery_eligibility.py::TestCRMDriftEndToEnd -q
+```
+
+Manual check against a running backend — seed one ineligible lead, then run
+the sweep and read the summary buckets (no new routes or fields were added):
+
+```bash
+# ineligible (opted out via custom_fields) → skipped_invalid
+curl -s -X POST "$BASE/api/v1/leads" -H "$H" -H 'Content-Type: application/json' \
+  -d '{"full_name":"Opt Out","phone":"+919000000001","custom_fields":{"opt_out":true}}'
+# ineligible (already Contacted) → skipped_inactive
+curl -s -X POST "$BASE/api/v1/leads" -H "$H" -H 'Content-Type: application/json' \
+  -d '{"full_name":"Contacted","phone":"+919000000002","status":"Contacted"}'
+
+curl -s -X POST "$BASE/api/v1/agent/recovery/run" -H "$H"   # 200
+```
+
+Expected: the two leads above appear only in `skipped_invalid` /
+`skipped_inactive` respectively, are absent from `candidates`, and get **no**
+recovery case in `GET /api/v1/agent/recovery/cases`.
 
 ### Step 8 — Run the sweep
 
@@ -695,6 +759,9 @@ curl -s "$BASE/api/v1/agent/recovery/cases/$CASE_ID" -H "$H"
 |---|---|
 | Re-run the sweep | still 6 cases — upserts per (business, lead), never duplicates |
 | Converted / Contacted leads | counted in `skipped_inactive`, no case created |
+| Opted-out / no-phone leads | counted in `skipped_invalid`, no case created |
+| Already `recovered` (status or `custom_fields.is_recovered`) | counted in `skipped_inactive`, no case created |
+| `dismissed` / `completed` case re-run | lead ignored; existing case is never re-opened or re-created |
 | `?status=recommended` filter | works (`?status=exhausted` → empty) |
 | No `X-API-Key` | `401 authentication_failed` |
 | `dev-key-biz-002` | empty case list; its own sweeps fetch 0 leads |
@@ -708,6 +775,9 @@ curl -s "$BASE/api/v1/agent/recovery/cases/$CASE_ID" -H "$H"
 | `CALLORA_RECOVERY_SLA_MINUTES` | `120` | never-contacted SLA |
 | `CALLORA_RECOVERY_STALL_DAYS` | `7` | stalled-follow-up threshold |
 | `CALLORA_RECOVERY_SCORE_THRESHOLD` | `0.40` | minimum recoverability score |
+| `CALLORA_RECOVERY_OPT_OUT_FLAGS` | `opt_out,opted_out,do_not_contact,dnc,unsubscribed,suppressed` | `custom_fields` flags treated as opt-out / suppression (consent) |
+| `CALLORA_RECOVERY_RECOVERED_STATUSES` | `recovered` | canonical `status` values meaning "already recovered" |
+| `CALLORA_RECOVERY_IGNORED_STATUSES` | `dismissed,suppressed,resolved,completed,in_recovery` | statuses closed out of recovery — never re-opened by a sweep |
 | `CALLORA_RECOVERY_API_BASE_URL` | unset | unset = fetch leads in-process via ASGI (same API contract); set to fetch over HTTP |
 | `GROQ_API_KEY` | unset | enables the LLM strategist; unset = rules-fallback |
 | `CALLORA_GROQ_MODEL` | `openai/gpt-oss-120b` | Groq model id |
