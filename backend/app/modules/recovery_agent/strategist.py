@@ -7,7 +7,7 @@ Ported from the validated notebook prototype:
   inside the block;
 - output is strict JSON validated against a fixed action enum —
   anything else falls back to the deterministic rules planner;
-- with no ``CALLORA_GROQ_API_KEY`` configured (or the ``groq`` package
+- with no ``GROQ_API_KEY`` configured (or the ``groq`` package
   missing) every plan uses ``rules-fallback`` and the sweep still
   completes — the resilience path is the default path in tests.
 """

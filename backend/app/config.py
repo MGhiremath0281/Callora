@@ -8,7 +8,7 @@ production without code changes.
 from functools import lru_cache
 from typing import Dict, List, Optional
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -105,7 +105,12 @@ class Settings(BaseSettings):
     # --- LLM (Recovery Strategist) ---------------------------------------
     # Optional: when no key is configured the strategist degrades to the
     # deterministic rules-fallback planner and the sweep still completes.
-    groq_api_key: Optional[str] = None
+    # Canonical env var is GROQ_API_KEY (matches .env); the legacy
+    # CALLORA_GROQ_API_KEY name is still accepted as a fallback.
+    groq_api_key: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("GROQ_API_KEY", "CALLORA_GROQ_API_KEY"),
+    )
     groq_model: str = "openai/gpt-oss-120b"
     llm_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
 
