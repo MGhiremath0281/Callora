@@ -350,3 +350,110 @@ class RecoveryCase(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
     )
+
+
+# ---------------------------------------------------------------------------
+# Recovery Dashboard — AI-generated outreach content & outreach history
+# ---------------------------------------------------------------------------
+
+
+class OutreachEventType:
+    """Event types recorded in the append-only outreach history.
+
+    ``CONTENT_GENERATED`` is written by the dashboard when an outreach
+    pack is produced. The ``call_*`` / ``message_*`` types are reserved
+    for the future ACT execution stage — Callora itself never places
+    calls or sends messages today, so no such record is ever fabricated.
+    """
+
+    CONTENT_GENERATED = "content_generated"
+    CALL_COMPLETED = "call_completed"
+    CALLBACK_REQUESTED = "callback_requested"
+    MESSAGE_SENT = "message_sent"
+    OUTREACH_FAILED = "outreach_failed"
+
+
+# Event types that represent an *executed* outreach attempt (as opposed
+# to content generation). The dashboard only reports these when real
+# persisted records exist.
+EXECUTION_EVENT_TYPES = (
+    OutreachEventType.CALL_COMPLETED,
+    OutreachEventType.CALLBACK_REQUESTED,
+    OutreachEventType.MESSAGE_SENT,
+    OutreachEventType.OUTREACH_FAILED,
+)
+
+
+class RecoveryOutreachContent(Base):
+    """The current AI-generated outreach pack for one recovery case.
+
+    One row per (business, case): generation replaces the pack in place
+    (with regeneration bookkeeping) so a dashboard read never needs to
+    call the LLM. The content is a *draft for agent review* — it is
+    never evidence that a call was placed or a message sent; execution
+    is tracked separately (``recovery_outreach_events``).
+    """
+
+    __tablename__ = "recovery_outreach_content"
+    __table_args__ = (
+        UniqueConstraint(
+            "business_id", "case_id", name="uq_recovery_outreach_business_case"
+        ),
+        Index("ix_recovery_outreach_content_lead", "lead_id"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(32), primary_key=True, default=lambda: prefixed_id("outreach")
+    )
+    business_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    case_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    lead_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Validated content pack: voice script, channel messages, email.
+    content: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    # Lead-facing language the content was composed in.
+    language: Mapped[Optional[str]] = mapped_column(String(32))
+    # "groq:<model>" or "rules-fallback" — never claims more than happened.
+    engine: Mapped[str] = mapped_column(String(64), nullable=False, default="rules-fallback")
+    model: Mapped[Optional[str]] = mapped_column(String(100))
+    generation_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    regenerated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class RecoveryOutreachEvent(Base):
+    """Append-only outreach history for a recovery case.
+
+    Only persisted, real records land here. Today the dashboard writes
+    ``content_generated`` events (content generation is an observable,
+    persisted action). Execution events (``call_completed``,
+    ``callback_requested``, ``message_sent``, ``outreach_failed``) will
+    be written by the future ACT execution stage; until a record exists,
+    the API never reports an outcome it does not have evidence for.
+    """
+
+    __tablename__ = "recovery_outreach_events"
+    __table_args__ = (
+        Index("ix_recovery_outreach_events_case", "case_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(32), primary_key=True, default=lambda: prefixed_id("oevt")
+    )
+    business_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    case_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    lead_id: Mapped[Optional[str]] = mapped_column(String(32))
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    channel: Mapped[Optional[str]] = mapped_column(String(16))
+    engine: Mapped[Optional[str]] = mapped_column(String(64))
+    detail: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )

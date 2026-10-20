@@ -197,6 +197,20 @@ class Settings(BaseSettings):
     groq_model: str = "openai/gpt-oss-120b"
     llm_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
 
+    # --- Outreach content (Recovery Dashboard) ---------------------------
+    # Display name used to sign AI-drafted outreach (email signatures,
+    # voice-script sign-offs) and to resolve "[Agent Name]"-style
+    # placeholders the model may emit. It is a name/label only — it must
+    # never be used to infer the agent's gender. When unset, a neutral
+    # default ("Callora Team") is used so no draft ever ships with an
+    # unresolved placeholder.
+    agent_display_name: Optional[str] = None
+    # Safe fallback when a lead's language is missing or is not one of
+    # the languages the outreach templates support ("hindi", "english").
+    # This is the only place the fallback language is decided — Hindi is
+    # never hardcoded for all leads.
+    default_outreach_language: str = "english"
+
     # --- Derived helpers -----------------------------------------------
 
     @field_validator("database_url")

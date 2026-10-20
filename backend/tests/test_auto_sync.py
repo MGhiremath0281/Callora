@@ -124,7 +124,8 @@ class TestRouteRegistration:
     def test_exactly_15_business_routes(self):
         """Exactly 15 business operations are registered under /api/v1."""
         ops = _business_operations()
-        assert len(ops) == 15, f"Expected 15 operations, got {len(ops)}: {sorted(ops)}"
+        # Recovery dashboard adds routes required by the dashboard task.
+        assert len(ops) == 20, f"Expected 20 operations, got {len(ops)}: {sorted(ops)}"
 
     def test_no_unversioned_leads_routes(self):
         """No unversioned /leads or /imports routes exist."""
@@ -142,7 +143,7 @@ class TestRouteRegistration:
             assert "/api/v1/api/v1" not in path
 
     def test_all_required_routes_present(self):
-        """All 15 required business routes are present."""
+        """All required business routes are present."""
         ops = _business_operations()
         required = {
             ("POST", "/api/v1/leads/import"),
@@ -160,8 +161,13 @@ class TestRouteRegistration:
             ("POST", "/api/v1/agent/recovery/run"),
             ("GET", "/api/v1/agent/recovery/cases"),
             ("GET", "/api/v1/agent/recovery/cases/{case_id}"),
+            ("GET", "/api/v1/agent/recovery/dashboard/summary"),
+            ("GET", "/api/v1/agent/recovery/cases/{case_id}/score-breakdown"),
+            ("GET", "/api/v1/agent/recovery/cases/{case_id}/outreach-content"),
+            ("POST", "/api/v1/agent/recovery/cases/{case_id}/outreach-content/generate"),
+            ("GET", "/api/v1/agent/recovery/cases/{case_id}/outcomes"),
         }
-        assert required == ops, f"Missing: {required - ops}; Extra: {ops - required}"
+        assert required.issubset(ops), f"Missing: {required - ops}"
 
 
 # ---------------------------------------------------------------------------

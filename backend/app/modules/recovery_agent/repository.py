@@ -48,6 +48,9 @@ def list_cases(
     status: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
+    priority_level: Optional[str] = None,
+    query: Optional[str] = None,
+    needs_human_approval: Optional[bool] = None,
 ) -> List[RecoveryCase]:
     """List cases in priority order.
 
@@ -55,16 +58,75 @@ def list_cases(
     existing recoverability score (desc) and finally the case id (asc)
     as a stable tie-break, so pagination is deterministic for a fixed
     dataset.
+
+    Optional dashboard filters (all backward compatible — ``None``
+    reproduces the original behaviour exactly):
+
+    ``priority_level``        only cases at that Module 5 level;
+    ``query``                 case-insensitive substring match on lead
+                              name, lead id or case id (dashboard search);
+    ``needs_human_approval``  only cases flagged for human approval.
     """
-    stmt = select(RecoveryCase).where(RecoveryCase.business_id == business_id)
-    if status is not None:
-        stmt = stmt.where(RecoveryCase.status == status)
+    stmt = _apply_case_filters(
+        select(RecoveryCase).where(RecoveryCase.business_id == business_id),
+        status,
+        priority_level,
+        query,
+        needs_human_approval,
+    )
     stmt = stmt.order_by(
         RecoveryCase.priority_score.desc().nulls_last(),
         RecoveryCase.score.desc(),
         RecoveryCase.id.asc(),
     ).limit(limit).offset(offset)
     return list(session.execute(stmt).scalars().all())
+
+
+def count_cases(
+    session: Session,
+    business_id: str,
+    status: Optional[str] = None,
+    priority_level: Optional[str] = None,
+    query: Optional[str] = None,
+    needs_human_approval: Optional[bool] = None,
+) -> int:
+    """Total cases matching the filters (pagination-independent)."""
+    stmt = _apply_case_filters(
+        select(func.count()).select_from(RecoveryCase).where(
+            RecoveryCase.business_id == business_id
+        ),
+        status,
+        priority_level,
+        query,
+        needs_human_approval,
+    )
+    return session.execute(stmt).scalar_one()
+
+
+def _apply_case_filters(
+    stmt,
+    status: Optional[str],
+    priority_level: Optional[str],
+    query: Optional[str],
+    needs_human_approval: Optional[bool],
+):
+    """Apply the optional dashboard filters to a SELECT statement."""
+    if status is not None:
+        stmt = stmt.where(RecoveryCase.status == status)
+    if priority_level is not None:
+        stmt = stmt.where(RecoveryCase.priority_level == priority_level)
+    if needs_human_approval is not None:
+        stmt = stmt.where(RecoveryCase.needs_human_approval.is_(needs_human_approval))
+    if query is not None and query.strip():
+        needle = f"%{query.strip().lower()}%"
+        stmt = stmt.where(
+            func.or_(
+                func.lower(RecoveryCase.lead_name).like(needle),
+                func.lower(RecoveryCase.lead_id).like(needle),
+                func.lower(RecoveryCase.id).like(needle),
+            )
+        )
+    return stmt
 
 
 def count_attempts_in_progress(session: Session, business_id: str, lead_id: str) -> int:

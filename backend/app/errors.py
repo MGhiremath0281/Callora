@@ -195,6 +195,31 @@ class RecoveryLeadsInvalidResponseError(AppError):
     code = "recovery_leads_invalid_response"
 
 
+# ---------------------------------------------------------------------------
+# Recovery Dashboard errors
+# ---------------------------------------------------------------------------
+
+
+class InvalidParameterError(AppError):
+    """A query/body parameter failed domain validation (e.g. an unknown
+    priority level)."""
+
+    status_code = 422
+    code = "invalid_parameter"
+
+
+class OutreachBlockedError(AppError):
+    """Outreach content may not be generated for this case.
+
+    Raised when the lead opted out (or was suppressed) or lost every
+    usable contact channel *after* the recovery case was created —
+    composing outreach for such a lead would violate the same
+    guardrails the sweep enforces."""
+
+    status_code = 409
+    code = "recovery_outreach_blocked"
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def _app_error_handler(_: Request, exc: AppError):

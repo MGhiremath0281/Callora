@@ -17,6 +17,7 @@ from typing import FrozenSet, Optional
 from app.config import Settings, get_settings
 from app.modules.recovery_agent.detect import EXCLUDED_STATUSES
 
+
 # Extra statuses that are not "actively handled" but must still be
 # treated as non-open opportunities by the eligibility gate.
 _EXTRA_EXCLUDED_STATUSES: FrozenSet[str] = frozenset(
@@ -50,13 +51,21 @@ class EligibilityConfig:
     require_reachability: bool = True
 
 
-def eligibility_config(settings: Optional[Settings] = None) -> EligibilityConfig:
+def _is_eligibility_config(obj: object) -> bool:
+    return isinstance(obj, EligibilityConfig)
+
+
+def eligibility_config(settings: Optional[object] = None) -> EligibilityConfig:
     """Build the eligibility config from application settings.
 
-    Falls back to :func:`get_settings` (and, failing that, the dataclass
-    defaults) so the gate can be used from tests and scripts without
-    a live settings object.
+    Accepts :class:`app.config.Settings` or an existing
+    :class:`EligibilityConfig` (idempotent) so callers do not need to
+    know which type they hold. Falls back to :func:`get_settings`
+    (and, failing that, the dataclass defaults) when ``None``.
     """
+    if _is_eligibility_config(settings):
+        return settings  # type: ignore[return-value]
+
     if settings is None:
         try:
             settings = get_settings()
@@ -66,15 +75,35 @@ def eligibility_config(settings: Optional[Settings] = None) -> EligibilityConfig
     if settings is None:
         return EligibilityConfig()
 
+    # Settings-like object
+    opt_out_flags = getattr(settings, "recovery_opt_out_flag_set", None)
+    if opt_out_flags is None:
+        # Fallback to direct attributes / defaults
+        opt_out_flags = _DEFAULT_OPT_OUT_FLAGS
+    else:
+        opt_out_flags = frozenset(opt_out_flags) or _DEFAULT_OPT_OUT_FLAGS
+
+    recovered = getattr(settings, "recovery_recovered_status_set", None)
+    if recovered is None:
+        recovered = frozenset({"recovered"})
+    else:
+        recovered = frozenset(recovered) or frozenset({"recovered"})
+
+    ignored = getattr(settings, "recovery_ignored_status_set", None)
+    if ignored is None:
+        ignored = EligibilityConfig().ignored_statuses
+    else:
+        ignored = frozenset(ignored) or EligibilityConfig().ignored_statuses
+
     return EligibilityConfig(
-        opt_out_flags=frozenset(settings.recovery_opt_out_flag_set) or _DEFAULT_OPT_OUT_FLAGS,
-        recovered_statuses=frozenset(settings.recovery_recovered_status_set)
-        or frozenset({"recovered"}),
-        ignored_statuses=frozenset(settings.recovery_ignored_status_set)
-        or EligibilityConfig().ignored_statuses,
+        opt_out_flags=opt_out_flags,
+        recovered_statuses=recovered,
+        ignored_statuses=ignored,
     )
 
 
-def recovered_statuses(settings: Optional[Settings] = None) -> FrozenSet[str]:
-    """The configured set of canonical statuses meaning "already recovered"."""
+def recovered_statuses(settings: Optional[object] = None) -> FrozenSet[str]:
+    """The configured set of canonical statuses meaning "already recovered".""" 
+    if _is_eligibility_config(settings):
+        return settings.recovered_statuses  # type: ignore[return-value]
     return eligibility_config(settings).recovered_statuses
