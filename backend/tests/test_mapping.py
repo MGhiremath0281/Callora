@@ -1,6 +1,6 @@
 """Unit tests for automatic column mapping."""
 
-from app.services.mapping import (
+from app.modules.lead_import.mapping import (
     build_row_values,
     detect_mappings,
     merge_first_last_name,
@@ -69,7 +69,13 @@ class TestAmbiguity:
     def test_override_can_force_custom_or_ignore(self):
         columns = ["Comments", "Name", "Mobile Number"]
         resolved = resolve_mappings(columns, {"Comments": "custom"})
-        assert resolved["Comments"] is None
+        assert resolved["Comments"] == "custom"
+        assert resolved["Name"] == "name"
+
+    def test_override_ignore_skips_column(self):
+        columns = ["Comments", "Name", "Mobile Number"]
+        resolved = resolve_mappings(columns, {"Comments": "ignore"})
+        assert resolved["Comments"] == "ignore"
         assert resolved["Name"] == "name"
 
     def test_unknown_column_not_mapped(self):

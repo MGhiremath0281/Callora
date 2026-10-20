@@ -1,7 +1,7 @@
 """Unit tests for row validation against the canonical lead structure."""
 
 from app.config import Settings
-from app.services.validation import validate_row
+from app.modules.lead_import.validators import validate_row
 
 
 def make_settings(**overrides) -> Settings:

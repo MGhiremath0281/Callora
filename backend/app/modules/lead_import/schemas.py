@@ -1,12 +1,28 @@
-"""Pydantic request/response schemas for the lead endpoints."""
+"""Pydantic request/response schemas shared by every lead entry point.
+
+``LeadRead`` is the single, strictly enforced lead output contract. Both
+input formats (CSV upload via ``POST /leads/import`` and direct JSON
+submission via ``POST /leads``) resolve to this exact schema, so
+downstream modules (CRM Sync, Campaigns) can rely on one shape:
+
+* ``phone`` is always a string (no numeric coercion, country codes kept
+  as given);
+* ``deal_value`` is always a decimal string with two fractional digits
+  (e.g. ``"7500000.00"``), never a float.
+"""
 
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, field_serializer
 
-from app.services.normalization import normalize_name, normalize_phone
+from app.modules.lead_import.normalizer import normalize_name, normalize_phone
+
+
+# ---------------------------------------------------------------------------
+# Lead schemas (canonical output contract)
+# ---------------------------------------------------------------------------
 
 
 class LeadCreate(BaseModel):
@@ -64,6 +80,8 @@ class LeadCreate(BaseModel):
 
 
 class LeadRead(BaseModel):
+    """Standardized lead output shared by CSV imports and JSON creation."""
+
     model_config = ConfigDict(from_attributes=True)
 
     id: str
@@ -78,7 +96,13 @@ class LeadRead(BaseModel):
     custom_fields: Dict[str, Any] = Field(default_factory=dict)
     external_id: Optional[str] = None
     created_at: datetime
-    updated_at: datetime
+
+    @field_serializer("deal_value")
+    def _serialize_deal_value(self, value: Optional[Decimal]) -> Optional[str]:
+        """Always emit deal_value as a 2-decimal-digit string."""
+        if value is None:
+            return None
+        return format(Decimal(str(value)).quantize(Decimal("0.01")), "f")
 
 
 class LeadListResponse(BaseModel):
@@ -86,3 +110,53 @@ class LeadListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+# ---------------------------------------------------------------------------
+# Import report schemas
+# ---------------------------------------------------------------------------
+
+
+class MappingSuggestionModel(BaseModel):
+    column: str
+    canonical_field: Optional[str] = None
+    confidence: float
+    matched_on: Optional[str] = None
+    ambiguous: bool = False
+    alternatives: List[str] = Field(default_factory=list)
+
+
+class ImportSummary(BaseModel):
+    import_id: str
+    status: str
+    total_rows: int
+    created: int
+    duplicates: int
+    rejected: int
+    errors_url: str
+
+
+class ImportStatusResponse(ImportSummary):
+    source_type: str
+    original_filename: Optional[str] = None
+    mapping: Dict[str, Any] = Field(default_factory=dict)
+    error_message: Optional[str] = None
+    created_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+
+
+class ImportErrorModel(BaseModel):
+    row_number: int
+    field: Optional[str] = None
+    error_code: str
+    message: str
+    raw_data: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ImportErrorListResponse(BaseModel):
+    import_id: str
+    total: int
+    page: int
+    page_size: int
+    items: List[ImportErrorModel]

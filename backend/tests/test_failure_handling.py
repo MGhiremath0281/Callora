@@ -4,7 +4,7 @@ event delivery failures must never lose data silently."""
 import pytest
 
 from app.models import EventStatus, ImportStatus, Lead, OutboxEvent
-from app.services.events import publish_pending_events
+from app.modules.lead_import.events import publish_pending_events
 from tests.csv_helpers import REALESTATE_HEADER, REALESTATE_ROWS, build_csv, upload
 from tests.conftest import auth_headers
 
@@ -52,7 +52,7 @@ class TestBadFiles:
     def test_invalid_mappings_json_rejected(self, client):
         csv_bytes = build_csv(REALESTATE_HEADER, REALESTATE_ROWS[:1])
         response = client.post(
-            "/leads/import",
+            "/api/v1/leads/import",
             files={"file": ("leads.csv", csv_bytes, "text/csv")},
             data={"mappings": "{not json"},
             headers=auth_headers(),
@@ -90,7 +90,7 @@ class TestProcessingCrash:
     def test_crash_marks_batch_failed_and_keeps_report_available(self, client, db, monkeypatch):
         """A crash mid-import must record a failed batch with an error
         message that remains retrievable."""
-        import app.services.importer as importer
+        import app.modules.lead_import.service as importer
 
         calls = {"count": 0}
         original = importer.build_row_values
@@ -114,12 +114,12 @@ class TestProcessingCrash:
         assert error["code"] == "import_failed"
         import_id = error["details"][0]["import_id"]
 
-        status_body = client.get(f"/imports/{import_id}", headers=auth_headers()).json()
+        status_body = client.get(f"/api/v1/imports/{import_id}", headers=auth_headers()).json()
         assert status_body["status"] == ImportStatus.FAILED
         assert "simulated crash" in status_body["error_message"]
 
     def test_failed_batch_commits_nothing(self, client, db, monkeypatch):
-        import app.services.importer as importer
+        import app.modules.lead_import.service as importer
 
         def boom(*args, **kwargs):
             raise RuntimeError("system down")
@@ -130,7 +130,7 @@ class TestProcessingCrash:
         response = upload(client, csv_bytes, auth_headers())
         assert response.status_code == 500
         import_id = response.json()["error"]["details"][0]["import_id"]
-        status_body = client.get(f"/imports/{import_id}", headers=auth_headers()).json()
+        status_body = client.get(f"/api/v1/imports/{import_id}", headers=auth_headers()).json()
         assert status_body["status"] == ImportStatus.FAILED
         # Atomicity: no half-imported leads from the failed batch.
         assert db.query(Lead).count() == 0
@@ -139,7 +139,7 @@ class TestProcessingCrash:
 class TestEventDeliveryFailure:
     def _create_lead(self, client):
         return client.post(
-            "/leads",
+            "/api/v1/leads",
             json={"name": "Rahul", "phone": "9876543210", "source": "website"},
             headers=auth_headers(),
         ).json()["id"]
@@ -156,7 +156,7 @@ class TestEventDeliveryFailure:
         def failing_post(url, event, timeout=5.0):
             raise ConnectionError("webhook is down")
 
-        import app.services.events as events
+        import app.modules.lead_import.events as events
 
         monkeypatch.setattr(events, "_post_webhook", failing_post)
         lead_id = self._create_lead(client)
@@ -184,7 +184,7 @@ class TestEventDeliveryFailure:
         current = get_settings()
 
         delivered = []
-        import app.services.events as events
+        import app.modules.lead_import.events as events
 
         monkeypatch.setattr(
             events, "_post_webhook", lambda url, e, timeout=5.0: delivered.append(e.id)
@@ -205,7 +205,7 @@ class TestEventDeliveryFailure:
         get_settings.cache_clear()
         current = get_settings()
 
-        import app.services.events as events
+        import app.modules.lead_import.events as events
 
         monkeypatch.setattr(events, "_post_webhook", lambda url, e, timeout=5.0: (_ for _ in ()).throw(ConnectionError("down")))
         self._create_lead(client)  # delivery pass 1 (in-request)

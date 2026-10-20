@@ -26,7 +26,12 @@
     environment:
       CALLORA_DATABASE_URL: postgresql+psycopg2://callora:callora@db:5432/callora
       CALLORA_API_KEYS: "biz_001:dev-key-biz-001"
-      # CALLORA_EVENT_WEBHOOK_URL: http://events-consumer:9000/webhook
+      CALLORA_CRM_BASE_URL: http://host.docker.internal:9000
+      # Dev-only: permits the exact host:port above (fake CRM on the host).
+      # Remove in production; all other private destinations stay blocked.
+      CALLORA_CRM_DEV_ALLOWED_DESTINATIONS: host.docker.internal:9000
+      CALLORA_CRM_TIMEOUT_SECONDS: 15
+      CALLORA_CRM_BUSINESS_NAME: UrbanNest Realty
       CALLORA_LOG_LEVEL: INFO
     volumes:
       - ./backend/app:/app/app

@@ -12,46 +12,9 @@ from tests.csv_helpers import (
 from tests.conftest import BIZ_2, auth_headers
 
 
-class TestPreview:
-    def test_preview_detects_mappings_and_counts(self, client, db):
-        csv_bytes = build_csv(REALESTATE_HEADER, REALESTATE_ROWS)
-        response = client.post(
-            "/leads/import/preview",
-            files={"file": ("leads.csv", csv_bytes, "text/csv")},
-            headers=auth_headers(),
-        )
-        assert response.status_code == 200, response.text
-        body = response.json()
-        resolved = body["mapping"]["resolved"]
-        assert resolved["Customer Name"] == "name"
-        assert resolved["Mobile Number"] == "phone"
-        assert resolved["Lead Source"] == "source"
-        assert resolved["Property Budget"] == "deal_value"
-        # row 2 + 3 valid, row 4 duplicate, row 5 invalid
-        assert body["counts"] == {"valid": 2, "invalid": 1, "duplicates": 1}
-        assert len(body["samples"]["valid"]) == 2
-        assert len(body["samples"]["invalid"]) == 1
-        assert body["samples"]["invalid"][0]["row_number"] == 5
-
-    def test_preview_persists_nothing(self, client, db):
-        csv_bytes = build_csv(REALESTATE_HEADER, REALESTATE_ROWS[:1])
-        client.post(
-            "/leads/import/preview",
-            files={"file": ("leads.csv", csv_bytes, "text/csv")},
-            headers=auth_headers(),
-        )
-        assert db.query(Lead).count() == 0
-
-    def test_preview_flags_ambiguous_mapping(self, client):
-        csv_bytes = build_csv(["Source Channel", "Mobile Number", "Name"], [["walk-in", "9876543210", "Rahul"]])
-        response = client.post(
-            "/leads/import/preview",
-            files={"file": ("leads.csv", csv_bytes, "text/csv")},
-            headers=auth_headers(),
-        )
-        body = response.json()
-        assert body["mapping"]["requires_confirmation"] is True
-        assert body["mapping"]["ambiguous"][0]["column"] == "Source Channel"
+# The preview endpoint was removed from the allowlist; its behaviour is
+# covered implicitly by the import tests and by the route-registration
+# assertions in tests/test_auto_sync.py.
 
 
 class TestCsvImport:
@@ -66,7 +29,7 @@ class TestCsvImport:
         assert body["created"] == 2
         assert body["duplicates"] == 1
         assert body["rejected"] == 1
-        assert body["errors_url"] == f"/imports/{body['import_id']}/errors"
+        assert body["errors_url"] == f"/api/v1/imports/{body['import_id']}/errors"
 
         # Counts reconcile with persisted data.
         assert db.query(Lead).count() == 2
@@ -85,7 +48,7 @@ class TestCsvImport:
     def test_import_errors_endpoint(self, client):
         csv_bytes = build_csv(REALESTATE_HEADER, REALESTATE_ROWS)
         import_id = upload(client, csv_bytes, auth_headers()).json()["import_id"]
-        response = client.get(f"/imports/{import_id}/errors", headers=auth_headers())
+        response = client.get(f"/api/v1/imports/{import_id}/errors", headers=auth_headers())
         assert response.status_code == 200
         body = response.json()
         assert body["import_id"] == import_id
@@ -174,7 +137,7 @@ class TestCsvImport:
         import_id = response.json()["import_id"]
 
         # Background processing has completed by the time we poll.
-        status_body = client.get(f"/imports/{import_id}", headers=auth_headers()).json()
+        status_body = client.get(f"/api/v1/imports/{import_id}", headers=auth_headers()).json()
         assert status_body["status"] == ImportStatus.COMPLETED
         assert status_body["created"] == 5
         assert db.query(Lead).count() == 5
@@ -182,7 +145,7 @@ class TestCsvImport:
     def test_import_status_endpoint(self, client):
         csv_bytes = build_csv(REALESTATE_HEADER, REALESTATE_ROWS)
         import_id = upload(client, csv_bytes, auth_headers()).json()["import_id"]
-        body = client.get(f"/imports/{import_id}", headers=auth_headers()).json()
+        body = client.get(f"/api/v1/imports/{import_id}", headers=auth_headers()).json()
         assert body["import_id"] == import_id
         assert body["status"] == ImportStatus.COMPLETED
         assert body["original_filename"] == "leads.csv"
@@ -193,11 +156,142 @@ class TestCsvImport:
     def test_cross_tenant_import_is_404(self, client):
         csv_bytes = build_csv(REALESTATE_HEADER, REALESTATE_ROWS)
         import_id = upload(client, csv_bytes, auth_headers()).json()["import_id"]
-        assert client.get(f"/imports/{import_id}", headers=auth_headers(BIZ_2)).status_code == 404
+        assert client.get(f"/api/v1/imports/{import_id}", headers=auth_headers(BIZ_2)).status_code == 404
         assert (
-            client.get(f"/imports/{import_id}/errors", headers=auth_headers(BIZ_2)).status_code
+            client.get(f"/api/v1/imports/{import_id}/errors", headers=auth_headers(BIZ_2)).status_code
             == 404
         )
+
+
+class TestMappingField:
+    """Tests for the mappings form field parsing and validation."""
+
+    def test_valid_mappings_accepted(self, client, db):
+        """Valid JSON mappings are accepted and applied."""
+        csv_bytes = build_csv(
+            ["Customer Name", "Mobile Number", "Lead Source", "Budget", "Email"],
+            [["Rahul Sharma", "9876543210", "99acres", "7500000", "rahul@example.com"]],
+        )
+        mappings = json.dumps({
+            "Customer Name": "name",
+            "Mobile Number": "phone",
+            "Lead Source": "source",
+            "Budget": "deal_value",
+            "Email": "email",
+        })
+        response = upload(client, csv_bytes, auth_headers(), mappings=mappings)
+        assert response.status_code == 201, response.text
+        lead = db.query(Lead).one()
+        assert lead.name == "Rahul Sharma"
+        assert lead.phone == "9876543210"
+        assert lead.source == "99acres"
+
+    def test_malformed_json_rejected(self, client):
+        """Malformed JSON in mappings returns 422 with a clear error."""
+        csv_bytes = build_csv(["Name", "Phone"], [["Rahul", "9876543210"]])
+        response = upload(client, csv_bytes, auth_headers(), mappings="not-json")
+        assert response.status_code == 422
+        body = response.json()
+        assert body["error"]["code"] == "malformed_file"
+        assert "valid JSON" in body["error"]["message"]
+
+    def test_swagger_string_sentinel_treated_as_empty(self, client, db):
+        """Swagger UI sends 'string' as default — treat it as no mappings."""
+        csv_bytes = build_csv(
+            ["Customer Name", "Mobile Number", "Lead Source"],
+            [["Rahul Sharma", "9876543210", "99acres"]],
+        )
+        response = upload(client, csv_bytes, auth_headers(), mappings="string")
+        assert response.status_code == 201, response.text
+        lead = db.query(Lead).one()
+        assert lead.name == "Rahul Sharma"
+
+    def test_mappings_non_object_rejected(self, client):
+        """A JSON array (not object) is rejected."""
+        csv_bytes = build_csv(["Name", "Phone"], [["Rahul", "9876543210"]])
+        response = upload(client, csv_bytes, auth_headers(), mappings='["name", "phone"]')
+        assert response.status_code == 422
+        assert "JSON object" in response.json()["error"]["message"]
+
+    def test_mappings_with_custom_field(self, client, db):
+        """Mapping a column to 'custom' preserves it in custom_fields."""
+        csv_bytes = build_csv(
+            ["Name", "Mobile Number", "Property Type"],
+            [["Rahul", "9876543210", "Apartment"]],
+        )
+        mappings = json.dumps({"Property Type": "custom"})
+        upload(client, csv_bytes, auth_headers(), mappings=mappings)
+        lead = db.query(Lead).one()
+        assert lead.custom_fields.get("property_type") == "Apartment"
+
+    def test_mappings_with_ignore(self, client, db):
+        """Mapping a column to 'ignore' skips it entirely."""
+        csv_bytes = build_csv(
+            ["Name", "Mobile Number", "Internal Note"],
+            [["Rahul", "9876543210", "some note"]],
+        )
+        mappings = json.dumps({"Internal Note": "ignore"})
+        upload(client, csv_bytes, auth_headers(), mappings=mappings)
+        lead = db.query(Lead).one()
+        assert "internal_note" not in lead.custom_fields
+
+    def test_urban_nest_full_header_set(self, client, db):
+        """The full UrbanNestCRM header set maps correctly."""
+        csv_bytes = build_csv(
+            [
+                "Customer Name",
+                "Mobile Number",
+                "Lead Source",
+                "Property Type",
+                "Budget",
+                "City",
+                "Email",
+                "Preferred Language",
+            ],
+            [["Rahul Sharma", "9876543210", "99acres", "Apartment", "7500000", "Bengaluru", "rahul@example.com", "english"]],
+        )
+        response = upload(client, csv_bytes, auth_headers())
+        assert response.status_code == 201, response.text
+        lead = db.query(Lead).one()
+        assert lead.name == "Rahul Sharma"
+        assert lead.phone == "9876543210"
+        assert lead.source == "99acres"
+        assert lead.email == "rahul@example.com"
+        assert lead.language == "english"
+        assert lead.custom_fields.get("property_type") == "Apartment"
+        assert lead.custom_fields.get("city") == "Bengaluru"
+
+    def test_duplicate_leads_in_file(self, client, db):
+        """Duplicate rows within the same file are detected."""
+        csv_bytes = build_csv(
+            ["Customer Name", "Mobile Number", "Lead Source"],
+            [
+                ["Rahul Sharma", "9876543210", "99acres"],
+                ["Rahul Sharma", "9876543210", "99acres"],
+            ],
+        )
+        response = upload(client, csv_bytes, auth_headers())
+        assert response.status_code == 201
+        body = response.json()
+        assert body["created"] == 1
+        assert body["duplicates"] == 1
+        assert db.query(Lead).count() == 1
+
+    def test_invalid_records_rejected(self, client, db):
+        """Rows with invalid data are rejected with row-level errors."""
+        csv_bytes = build_csv(
+            ["Customer Name", "Mobile Number", "Lead Source"],
+            [
+                ["Rahul Sharma", "9876543210", "99acres"],
+                ["Bad Phone", "123", "website"],
+            ],
+        )
+        response = upload(client, csv_bytes, auth_headers())
+        assert response.status_code == 201
+        body = response.json()
+        assert body["created"] == 1
+        assert body["rejected"] == 1
+        assert db.query(Lead).count() == 1
 
 
 class TestLeadSchemaConsistency:
@@ -206,7 +300,7 @@ class TestLeadSchemaConsistency:
         csv_bytes = build_csv(["Name", "Phone", "Source"], [["Rahul Sharma", "9876543210", "Website"]])
         upload(client, csv_bytes, auth_headers())
         client.post(
-            "/leads",
+            "/api/v1/leads",
             json={"name": "Priya Patel", "phone": "9812345678", "source": "Website"},
             headers=auth_headers(),
         )

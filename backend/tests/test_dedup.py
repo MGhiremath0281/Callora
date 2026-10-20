@@ -1,7 +1,7 @@
 """Unit tests for duplicate detection."""
 
 from app.models import Lead
-from app.services.dedup import REASON_EXISTING, REASON_IN_FILE, DuplicateChecker, filter_duplicates
+from app.modules.lead_import.dedup import REASON_EXISTING, REASON_IN_FILE, DuplicateChecker, filter_duplicates
 
 
 def _lead(db, phone, business="biz_001", email=None):

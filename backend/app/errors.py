@@ -103,6 +103,68 @@ class ImportProcessingError(AppError):
         self.import_id = import_id
 
 
+# ---------------------------------------------------------------------------
+# Module 2 — CRM Synchronization errors
+# ---------------------------------------------------------------------------
+
+
+class CRMConnectionNotFoundError(AppError):
+    status_code = 404
+    code = "crm_connection_not_found"
+
+    def __init__(self, connection_id: str):
+        super().__init__(f"CRM connection '{connection_id}' not found or inactive")
+        self.connection_id = connection_id
+
+
+class CRMConnectionInactiveError(AppError):
+    status_code = 400
+    code = "crm_connection_inactive"
+
+    def __init__(self, connection_id: str):
+        super().__init__(f"CRM connection '{connection_id}' is inactive")
+        self.connection_id = connection_id
+
+
+class CRMAuthError(AppError):
+    status_code = 502
+    code = "crm_authentication_failed"
+
+
+class CRMTimeoutError(AppError):
+    status_code = 504
+    code = "crm_timeout"
+
+
+class CRMUnavailableError(AppError):
+    status_code = 503
+    code = "crm_unavailable"
+
+
+class CRMIdempotencyConflictError(AppError):
+    status_code = 409
+    code = "crm_idempotency_conflict"
+
+    def __init__(self, key: str):
+        super().__init__(
+            f"Idempotency key '{key}' was already used with a different payload"
+        )
+        self.key = key
+
+
+class CRMSyncError(AppError):
+    status_code = 502
+    code = "crm_sync_failed"
+
+
+class CRMConnectionValidationError(AppError):
+    """The submitted CRM connection failed connectivity/authentication
+    validation. The connection is NOT saved and never reported verified."""
+
+    status_code = 502
+    code = "crm_connection_validation_failed"
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def _app_error_handler(_: Request, exc: AppError):

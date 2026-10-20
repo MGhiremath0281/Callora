@@ -158,3 +158,124 @@ class IdempotencyKey(Base):
     key: Mapped[str] = mapped_column(String(128), nullable=False)
     response_ref: Mapped[Optional[str]] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# Module 2 — CRM Synchronization models
+# ---------------------------------------------------------------------------
+
+
+class CRMConnection(Base):
+    """A configured external CRM connection for one business."""
+
+    __tablename__ = "crm_connections"
+    __table_args__ = (
+        UniqueConstraint("business_id", "connection_id", name="uq_crm_conn_business_connection"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(32), primary_key=True, default=lambda: prefixed_id("crmconn")
+    )
+    business_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    connection_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_active: Mapped[bool] = mapped_column(default=True, nullable=False)
+    crm_base_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    crm_api_key: Mapped[Optional[str]] = mapped_column(String(500))
+    crm_timeout_seconds: Mapped[float] = mapped_column(default=15.0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class CRMSyncStatus:
+    PENDING = "pending"
+    CREATED = "created"
+    UPDATED = "updated"
+    FAILED = "failed"
+
+
+class CRMSyncRecord(Base):
+    """Persistent record of one CRM synchronization attempt."""
+
+    __tablename__ = "crm_sync_records"
+    __table_args__ = (
+        Index("ix_crm_sync_lead", "lead_id"),
+        Index("ix_crm_sync_connection", "connection_id"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(32), primary_key=True, default=lambda: prefixed_id("sync")
+    )
+    lead_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    business_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    connection_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    idempotency_key: Mapped[Optional[str]] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default=CRMSyncStatus.PENDING)
+    external_crm_id: Mapped[Optional[str]] = mapped_column(String(128))
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class CRMSyncIdempotency(Base):
+    """Idempotency store for CRM sync requests.
+
+    Enforced at the database level so concurrent requests with the same key
+    cannot both proceed. The payload hash detects key reuse with a different
+    payload.
+    """
+
+    __tablename__ = "crm_sync_idempotency"
+    __table_args__ = (
+        UniqueConstraint(
+            "business_id", "connection_id", "idempotency_key", name="uq_crm_sync_idem"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    business_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    connection_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    response_data: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="processing")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+# ---------------------------------------------------------------------------
+# Downstream Agent Storage
+# ---------------------------------------------------------------------------
+
+
+class AgentLead(Base):
+    """Query-optimized projection of a lead for downstream AI agents."""
+
+    __tablename__ = "agent_leads"
+    __table_args__ = (
+        Index("ix_agent_leads_business", "business_id"),
+        Index("ix_agent_leads_status", "status"),
+        Index("ix_agent_leads_external", "external_crm_id"),
+    )
+
+    lead_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    business_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    phone: Mapped[str] = mapped_column(String(32), nullable=False)
+    email: Mapped[Optional[str]] = mapped_column(String(255))
+    source: Mapped[str] = mapped_column(String(100), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="New")
+    external_crm_id: Mapped[Optional[str]] = mapped_column(String(128))
+    language: Mapped[Optional[str]] = mapped_column(String(32))
+    deal_value: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2))
+    last_contact_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    custom_fields: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )

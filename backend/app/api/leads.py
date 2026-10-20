@@ -17,9 +17,9 @@ from app.db.session import get_db
 from app.errors import ConflictError, LeadNotFoundError
 from app.logging_config import bind_context, get_logger
 from app.models import IdempotencyKey, Lead
-from app.schemas.lead import LeadCreate, LeadListResponse, LeadRead
-from app.services import events as events_service
-from app.services import importer as importer_service
+from app.modules.lead_import import events as events_service
+from app.modules.lead_import import service as importer_service
+from app.modules.lead_import.schemas import LeadCreate, LeadListResponse, LeadRead
 
 logger = get_logger(__name__)
 
@@ -80,13 +80,9 @@ def create_lead(
             details=[{"lead_id": existing_phone.id, "reason": "duplicate_phone"}],
         )
 
-    custom_fields = dict(payload.custom_fields)
-    if settings.custom_field_allowlist_set:
-        custom_fields = {
-            k: v for k, v in custom_fields.items() if k in settings.custom_field_allowlist_set
-        }
-    if not settings.auto_capture_custom_fields and not settings.custom_field_allowlist_set:
-        custom_fields = {}
+    custom_fields = importer_service.apply_custom_field_policy(
+        dict(payload.custom_fields), settings
+    )
 
     lead = Lead(
         business_id=business_id,
@@ -105,6 +101,26 @@ def create_lead(
     # The outbox event is committed atomically with the lead so that a
     # committed lead always has a reliable lead.created event record.
     events_service.enqueue_lead_created(db, business_id, lead.id)
+
+    # Project into agent_leads in the same transaction so manually
+    # created leads are immediately visible to the Agent Leads API,
+    # exactly like CSV-imported leads.
+    from app.modules.agent_storage.service import upsert_agent_lead
+
+    upsert_agent_lead(
+        db,
+        lead_id=lead.id,
+        business_id=business_id,
+        name=lead.name,
+        phone=lead.phone,
+        source=lead.source,
+        email=lead.email,
+        language=lead.language,
+        deal_value=lead.deal_value,
+        last_contact_at=lead.last_contact_at,
+        custom_fields=lead.custom_fields,
+        external_crm_id=lead.external_id,
+    )
 
     if idempotency_key:
         try:
