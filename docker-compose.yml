@@ -33,6 +33,8 @@
       CALLORA_CRM_TIMEOUT_SECONDS: 15
       CALLORA_CRM_BUSINESS_NAME: UrbanNest Realty
       CALLORA_LOG_LEVEL: INFO
+      # Optional LLM key for the recovery strategist; unset = rules-fallback.
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
     volumes:
       - ./backend/app:/app/app
       - ./backend/alembic:/app/alembic

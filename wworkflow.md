@@ -645,7 +645,7 @@ Rules of the engine:
   CALLORA_RECOVERY_SCORE_THRESHOLD` (default 0.40).
 - Guardrails run before any LLM call: opted-out leads and leads with no
   reachable channel are hard-blocked (`route=block`, plan `archive`).
-- Without `CALLORA_GROQ_API_KEY` (or if the LLM errors / returns
+- Without `GROQ_API_KEY` (or if the LLM errors / returns
   invalid JSON) plans come from the deterministic rules planner —
   `engine` shows which one was used.
 
@@ -709,5 +709,5 @@ curl -s "$BASE/api/v1/agent/recovery/cases/$CASE_ID" -H "$H"
 | `CALLORA_RECOVERY_STALL_DAYS` | `7` | stalled-follow-up threshold |
 | `CALLORA_RECOVERY_SCORE_THRESHOLD` | `0.40` | minimum recoverability score |
 | `CALLORA_RECOVERY_API_BASE_URL` | unset | unset = fetch leads in-process via ASGI (same API contract); set to fetch over HTTP |
-| `CALLORA_GROQ_API_KEY` | unset | enables the LLM strategist; unset = rules-fallback |
+| `GROQ_API_KEY` | unset | enables the LLM strategist; unset = rules-fallback |
 | `CALLORA_GROQ_MODEL` | `openai/gpt-oss-120b` | Groq model id |
