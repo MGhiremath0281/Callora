@@ -121,10 +121,10 @@ def _business_operations() -> set:
 
 
 class TestRouteRegistration:
-    def test_exactly_12_business_routes(self):
-        """Exactly 12 business operations are registered under /api/v1."""
+    def test_exactly_15_business_routes(self):
+        """Exactly 15 business operations are registered under /api/v1."""
         ops = _business_operations()
-        assert len(ops) == 12, f"Expected 12 operations, got {len(ops)}: {sorted(ops)}"
+        assert len(ops) == 15, f"Expected 15 operations, got {len(ops)}: {sorted(ops)}"
 
     def test_no_unversioned_leads_routes(self):
         """No unversioned /leads or /imports routes exist."""
@@ -142,7 +142,7 @@ class TestRouteRegistration:
             assert "/api/v1/api/v1" not in path
 
     def test_all_required_routes_present(self):
-        """All 12 required business routes are present."""
+        """All 15 required business routes are present."""
         ops = _business_operations()
         required = {
             ("POST", "/api/v1/leads/import"),
@@ -157,6 +157,9 @@ class TestRouteRegistration:
             ("GET", "/api/v1/agent/leads"),
             ("GET", "/api/v1/agent/leads/{lead_id}"),
             ("GET", "/api/v1/agent/leads/by-external/{external_crm_id}"),
+            ("POST", "/api/v1/agent/recovery/run"),
+            ("GET", "/api/v1/agent/recovery/cases"),
+            ("GET", "/api/v1/agent/recovery/cases/{case_id}"),
         }
         assert required == ops, f"Missing: {required - ops}; Extra: {ops - required}"
 
