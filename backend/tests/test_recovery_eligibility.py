@@ -565,7 +565,6 @@ class TestCasePersistence:
         import threading
 
         from app.db.session import get_session_factory
-        from app.modules.recovery_agent.service import run_recovery_engine
 
         db = get_session_factory()()
         upsert_agent_lead(
