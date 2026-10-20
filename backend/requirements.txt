@@ -9,5 +9,9 @@ psycopg2-binary>=2.9.9
 alembic>=1.13
 httpx>=0.27
 
+# LLM (Recovery Agent strategist) — optional at runtime: without
+# CALLORA_GROQ_API_KEY the strategist degrades to rules-fallback.
+groq>=0.13
+
 # Test dependencies
 pytest>=8.0

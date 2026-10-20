@@ -21,11 +21,14 @@ def upsert_agent_lead(
     custom_fields: Optional[Dict[str, Any]] = None,
     external_crm_id: Optional[str] = None,
     status: str = "New",
+    created_at: Optional[Any] = None,
 ) -> AgentLead:
     """Insert or update an agent_leads record keyed on lead_id.
 
     Uses an upsert so repeated successful synchronizations do not create
-    duplicate agent records.
+    duplicate agent records. ``created_at`` is the canonical lead's
+    creation time (needed by Module 3's opportunity detection); when it
+    is omitted the projection stamp is used.
     """
     existing = session.get(AgentLead, lead_id)
 
@@ -43,6 +46,7 @@ def upsert_agent_lead(
             deal_value=deal_value,
             last_contact_at=last_contact_at,
             custom_fields=custom_fields or {},
+            **({"created_at": created_at} if created_at is not None else {}),
         )
         session.add(record)
         return record
@@ -58,4 +62,6 @@ def upsert_agent_lead(
     existing.deal_value = deal_value
     existing.last_contact_at = last_contact_at
     existing.custom_fields = custom_fields or {}
+    if created_at is not None:
+        existing.created_at = created_at
     return existing

@@ -257,6 +257,7 @@ def _populate_agent_leads(db: Session, lead_ids: list) -> None:
             last_contact_at=lead.last_contact_at,
             custom_fields=lead.custom_fields,
             external_crm_id=lead.external_id,
+            created_at=lead.created_at,
         )
 
 

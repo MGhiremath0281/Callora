@@ -120,6 +120,7 @@ def create_lead(
         last_contact_at=lead.last_contact_at,
         custom_fields=lead.custom_fields,
         external_crm_id=lead.external_id,
+        created_at=lead.created_at,
     )
 
     if idempotency_key:

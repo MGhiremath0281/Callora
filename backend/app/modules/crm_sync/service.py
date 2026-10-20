@@ -450,6 +450,7 @@ class CRMSyncService:
             custom_fields=lead.custom_fields,
             external_crm_id=external_crm_id,
             status=(agent_record.status if agent_record else "New"),
+            created_at=lead.created_at,
         )
 
         # Store idempotency result.

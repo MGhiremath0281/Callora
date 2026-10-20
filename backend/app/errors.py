@@ -165,6 +165,36 @@ class CRMConnectionValidationError(AppError):
     code = "crm_connection_validation_failed"
 
 
+# ---------------------------------------------------------------------------
+# Module 3 — Recovery Agent (Opportunity Detection) errors
+# ---------------------------------------------------------------------------
+
+
+class RecoveryLeadsUnavailableError(AppError):
+    """The agent-leads API could not be reached (network error or 5xx).
+
+    The sweep never runs on partial data; the workflow itself is
+    unaffected and can be retried."""
+
+    status_code = 503
+    code = "recovery_leads_unavailable"
+
+
+class RecoveryLeadsTimeoutError(AppError):
+    """The agent-leads API did not respond within the configured timeout."""
+
+    status_code = 504
+    code = "recovery_leads_timeout"
+
+
+class RecoveryLeadsInvalidResponseError(AppError):
+    """The agent-leads API returned a payload that violates the contract
+    (bad JSON, missing ``items``, non-list items...)."""
+
+    status_code = 502
+    code = "recovery_leads_invalid_response"
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def _app_error_handler(_: Request, exc: AppError):

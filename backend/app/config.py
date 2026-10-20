@@ -81,6 +81,34 @@ class Settings(BaseSettings):
     #   CALLORA_CRM_DEV_ALLOWED_DESTINATIONS=host.docker.internal:9000
     crm_dev_allowed_destinations: str = ""
 
+    # --- Module 3 — Recovery Agent (Opportunity Detection) ---------------
+    # Recovery criteria (pure rules, evaluated per lead).
+    recovery_sla_minutes: int = Field(default=120, ge=1)
+    recovery_stall_days: int = Field(default=7, ge=1)
+    recovery_score_threshold: float = Field(default=0.40, ge=0.0, le=1.0)
+    recovery_max_attempts: int = Field(default=3, ge=1)
+    # Quiet hours only gate *outreach*; when disabled (default) a sweep
+    # run at night still produces recommendations instead of archiving
+    # every candidate. The ACT stage enables this before sending.
+    recovery_enforce_quiet_hours: bool = False
+    recovery_quiet_hours_start: int = Field(default=21, ge=0, le=23)
+    recovery_quiet_hours_end: int = Field(default=8, ge=0, le=23)
+    # The agent fetches leads through GET /api/v1/agent/leads. When
+    # recovery_api_base_url is unset the request is dispatched
+    # in-process (ASGI transport) through the exact same API contract,
+    # including X-API-Key authentication. Set it to a base URL (e.g.
+    # http://backend:8001) to fetch over the network instead.
+    recovery_api_base_url: Optional[str] = None
+    recovery_fetch_page_size: int = Field(default=200, ge=1, le=500)
+    recovery_fetch_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
+
+    # --- LLM (Recovery Strategist) ---------------------------------------
+    # Optional: when no key is configured the strategist degrades to the
+    # deterministic rules-fallback planner and the sweep still completes.
+    groq_api_key: Optional[str] = None
+    groq_model: str = "openai/gpt-oss-120b"
+    llm_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+
     # --- Derived helpers -----------------------------------------------
 
     @field_validator("database_url")

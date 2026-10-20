@@ -1,11 +1,12 @@
 # Callora — Workflow & Endpoint Testing Guide
 
-How to test **all 12 business endpoints** and the full end-to-end workflow:
+How to test **all 15 business endpoints** and the full end-to-end workflow:
 
 ```
 CSV upload → map & standardize → validate & deduplicate → persist leads
            → check CRM connection → synchronize conditionally
            → expose agent-ready leads
+           → recovery agent detects neglected leads → recovery cases
 ```
 
 Every expected response in this guide was produced by **actually running the
@@ -47,7 +48,7 @@ Interactive API docs: `$BASE/docs`
 
 ---
 
-## 2. The 12-route allowlist
+## 2. The 15-route allowlist
 
 | # | Method | Route | Purpose |
 |---|--------|-------|---------|
@@ -63,6 +64,9 @@ Interactive API docs: `$BASE/docs`
 | 10 | GET | `/api/v1/agent/leads` | List agent-ready leads |
 | 11 | GET | `/api/v1/agent/leads/{lead_id}` | Retrieve an agent-ready lead |
 | 12 | GET | `/api/v1/agent/leads/by-external/{external_crm_id}` | Find a lead by external CRM ID |
+| 13 | POST | `/api/v1/agent/recovery/run` | Run the opportunity-detection sweep |
+| 14 | GET | `/api/v1/agent/recovery/cases` | List recovery cases |
+| 15 | GET | `/api/v1/agent/recovery/cases/{case_id}` | Retrieve one recovery case |
 
 Infrastructure (kept, outside the allowlist): `GET /`, `GET /health`, `/docs`.
 
@@ -546,7 +550,7 @@ curl -s $BASE/openapi.json | python3 -c "
 import json, sys
 paths = json.load(sys.stdin)['paths']
 biz = sorted((m.upper(), p) for p, i in paths.items() for m in i if p.startswith('/api/v1/'))
-print('business operations:', len(biz))          # -> 12
+print('business operations:', len(biz))          # -> 15
 print('double prefix:', [p for p in paths if '/api/v1/api/v1' in p])   # -> []
 print('unversioned:', [p for p in paths if not p.startswith('/api/v1/') and p not in ('/', '/health')])
 # -> []
@@ -556,7 +560,7 @@ print('unversioned:', [p for p in paths if not p.startswith('/api/v1/') and p no
 Expected output:
 
 ```
-business operations: 12
+business operations: 15
 double prefix: []
 unversioned: []
 ```
@@ -570,7 +574,7 @@ cd backend
 python3 -m pytest tests/ -q
 ```
 
-**Expected: `201 passed`** (plus 1 upstream Starlette deprecation warning).
+**Expected: `278 passed`** (plus 1 upstream Starlette deprecation warning).
 
 Coverage map:
 
@@ -584,6 +588,9 @@ Coverage map:
 | Duplicate prevention & retry/idempotency | `test_crm_sync.py`, `test_dedup.py`, `test_api_leads.py` |
 | Persistence of external CRM IDs & sync results | `test_crm_sync.py`, `test_auto_sync.py` |
 | All 3 Agent Leads endpoints | `test_agent_storage.py`, `test_api_leads.py` |
+| Opportunity signals, scoring, guardrails, strategist fallback | `test_recovery_detect.py` |
+| Recovery sweep, cases API, idempotent re-runs, status filter | `test_recovery_api.py` |
+| Recovery resilience: timeouts, 5xx, malformed payloads, LLM outage | `test_recovery_resilience.py` |
 | CRM connection configuration & validation | `test_crm_connections.py` |
 | CRM Connections listing endpoint | `test_crm_sync.py::TestCRMConnectionsEndpoint` |
 | Manual CRM synchronization | `test_crm_sync.py` |
@@ -607,3 +614,100 @@ Coverage map:
 | Auto-sync "didn't happen" | It runs as a background task right after the response — wait a moment, then re-check; verify `CALLORA_CRM_BASE_URL` and that the connection `is_active` |
 | `502 crm_sync_failed` | Fake CRM not running, wrong URL, or bad credentials — the lead is unaffected |
 | Port confusion | Compose serves `8001`, local uvicorn defaults to `8000` |
+
+---
+
+## 4B. Part C — Module 3: Recovery Agent (Opportunity Detection)
+
+The recovery agent fetches agent-ready leads through **GET
+`/api/v1/agent/leads`** (X-API-Key, pagination), evaluates them against
+recovery criteria, and persists **recovery cases** — the hand-off
+surface for downstream workflow steps.
+
+Detection is pure rules; only the play/message choice uses the LLM.
+
+| Signal | Criterion |
+|---|---|
+| `never_contacted` | `last_contact_at` null and age > `CALLORA_RECOVERY_SLA_MINUTES` (default 120) |
+| `stalled_follow_up` | last touch older than `CALLORA_RECOVERY_STALL_DAYS` (default 7) |
+| `crm_sync_drift` | `external_crm_id` null **and** the business has an active CRM connection |
+| `event_delivery_failed` | the lead's `lead.created` outbox event is in terminal `failed` state |
+
+Rules of the engine:
+
+- Leads whose `status` is active or converted (`Contacted`, `Qualified`,
+  `Converted`, `Closed`, …) are **excluded** — only `New`-style leads
+  become candidates.
+- A null `external_crm_id` without a configured CRM is the normal state,
+  **not** drift.
+- Scores: `R = 0.35·VALUE + 0.25·RECENCY + 0.20·REACHABILITY +
+  0.15·PRIOR + 0.05·DRIFT − PENALTY`; candidates need `R ≥
+  CALLORA_RECOVERY_SCORE_THRESHOLD` (default 0.40).
+- Guardrails run before any LLM call: opted-out leads and leads with no
+  reachable channel are hard-blocked (`route=block`, plan `archive`).
+- Without `CALLORA_GROQ_API_KEY` (or if the LLM errors / returns
+  invalid JSON) plans come from the deterministic rules planner —
+  `engine` shows which one was used.
+
+### Step 8 — Run the sweep
+
+The demo below sets `CALLORA_RECOVERY_SLA_MINUTES=1` so freshly imported
+leads breach the SLA immediately (default is 120 minutes; leads older
+than that need no special setup).
+
+```bash
+curl -s -X POST "$BASE/api/v1/agent/recovery/run" -H "$H"
+```
+
+**Verified — HTTP 200** (after importing `sample.csv`, 6 leads):
+
+```json
+{ "business_id": "biz_001", "fetched": 6, "evaluated": 6,
+  "skipped_inactive": 0, "skipped_invalid": 0,
+  "signals_detected": 6, "candidates": 6, "cases_upserted": 6,
+  "engine": "rules-fallback", "swept_at": "2026-10-20T06:35:37.933739+00:00" }
+```
+
+### Step 9 — Read the recovery cases
+
+```bash
+curl -s "$BASE/api/v1/agent/recovery/cases" -H "$H"
+curl -s "$BASE/api/v1/agent/recovery/cases/$CASE_ID" -H "$H"
+```
+
+**Verified — HTTP 200** (abridged; ordered by score, newest signal first):
+
+```json
+{ "items": [
+    { "case_id": "case_106d5fed06ee4886", "lead_id": "lead_80d41b65cab84d40",
+      "lead_name": "Kavya Rao", "business_id": "biz_001", "score": 0.95,
+      "signals": [ { "signal": "never_contacted", "severity": "high",
+                     "detail": "no contact 2 min after creation (SLA 1 min)" } ],
+      "route": "llm", "action": "re_contact_lead", "channel": "sms",
+      "message": "Hi Kavya, this is regarding your enquiry (ref lead_80d41b65cab84d40). May we schedule a quick call today?",
+      "rationale": "deterministic fallback policy", "engine": "rules-fallback",
+      "needs_human_approval": false, "status": "recommended",
+      "created_at": "2026-10-20T06:35:37.933739", "updated_at": "…" }, … ],
+  "business_id": "biz_001", "limit": 50, "offset": 0 }
+```
+
+| Follow-up check | Verified result |
+|---|---|
+| Re-run the sweep | still 6 cases — upserts per (business, lead), never duplicates |
+| Converted / Contacted leads | counted in `skipped_inactive`, no case created |
+| `?status=recommended` filter | works (`?status=exhausted` → empty) |
+| No `X-API-Key` | `401 authentication_failed` |
+| `dev-key-biz-002` | empty case list; its own sweeps fetch 0 leads |
+| Leads API down / timeout / bad payload | `503 recovery_leads_unavailable` / `504 recovery_leads_timeout` / `502 recovery_leads_invalid_response` — nothing partial is persisted |
+| No Groq key | `engine: "rules-fallback"`, sweep completes |
+
+### New configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CALLORA_RECOVERY_SLA_MINUTES` | `120` | never-contacted SLA |
+| `CALLORA_RECOVERY_STALL_DAYS` | `7` | stalled-follow-up threshold |
+| `CALLORA_RECOVERY_SCORE_THRESHOLD` | `0.40` | minimum recoverability score |
+| `CALLORA_RECOVERY_API_BASE_URL` | unset | unset = fetch leads in-process via ASGI (same API contract); set to fetch over HTTP |
+| `CALLORA_GROQ_API_KEY` | unset | enables the LLM strategist; unset = rules-fallback |
+| `CALLORA_GROQ_MODEL` | `openai/gpt-oss-120b` | Groq model id |

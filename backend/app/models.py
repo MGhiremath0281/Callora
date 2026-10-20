@@ -276,6 +276,66 @@ class AgentLead(Base):
     deal_value: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2))
     last_contact_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     custom_fields: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+class RecoveryCaseStatus:
+    """Lifecycle of a Module 3 recovery case.
+
+    Module 3 (Opportunity Detection) produces recommendations; the ACT
+    stage (future module) moves cases through ``in_recovery`` →
+    ``recovered`` / ``exhausted``.
+    """
+
+    RECOMMENDED = "recommended"
+    IN_RECOVERY = "in_recovery"
+    RECOVERED = "recovered"
+    EXHAUSTED = "exhausted"
+    ARCHIVED = "archived"
+
+
+class RecoveryCase(Base):
+    """One detected recovery opportunity for a neglected lead.
+
+    Created/upserted by the Module 3 recovery sweep. Rows are the
+    hand-off surface for downstream components (messaging, ACT stage,
+    dashboards): every recommendation carries its signals, score and the
+    chosen plan, and is idempotent per (business_id, lead_id).
+    """
+
+    __tablename__ = "recovery_cases"
+    __table_args__ = (
+        Index("ix_recovery_cases_business", "business_id"),
+        Index("ix_recovery_cases_status", "status"),
+        UniqueConstraint("business_id", "lead_id", name="uq_recovery_cases_business_lead"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(32), primary_key=True, default=lambda: prefixed_id("case")
+    )
+    business_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    lead_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    lead_name: Mapped[Optional[str]] = mapped_column(String(255))
+    score: Mapped[Optional[Decimal]] = mapped_column(Numeric(4, 3))
+    signals: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    route: Mapped[Optional[str]] = mapped_column(String(16))
+    action: Mapped[Optional[str]] = mapped_column(String(32))
+    channel: Mapped[Optional[str]] = mapped_column(String(16))
+    message: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    rationale: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    engine: Mapped[str] = mapped_column(String(64), nullable=False, default="rules-fallback")
+    needs_human_approval: Mapped[bool] = mapped_column(default=False, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(24), nullable=False, default=RecoveryCaseStatus.RECOMMENDED
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
     )
