@@ -20,6 +20,7 @@ from app.logging_config import setup_logging
 from app.modules.crm_sync import connection_seed
 from app.modules.crm_sync import router as crm_sync_api
 from app.modules.recovery_agent import router as recovery_agent_api
+from app.modules.recovery_dashboard import router as recovery_dashboard_api
 from app.db.session import get_session_factory
 
 API_PREFIX = "/api/v1"
@@ -62,6 +63,7 @@ app.include_router(crm_sync_api.router, prefix=API_PREFIX)
 app.include_router(crm_connections_api.router, prefix=API_PREFIX)
 app.include_router(agent_leads_api.router, prefix=API_PREFIX)
 app.include_router(recovery_agent_api.router, prefix=API_PREFIX)
+app.include_router(recovery_dashboard_api.router, prefix=API_PREFIX)
 
 
 @app.get("/")
