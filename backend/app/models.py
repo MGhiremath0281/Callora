@@ -157,6 +157,10 @@ class IdempotencyKey(Base):
     scope: Mapped[str] = mapped_column(String(50), nullable=False)
     key: Mapped[str] = mapped_column(String(128), nullable=False)
     response_ref: Mapped[Optional[str]] = mapped_column(String(64))
+    # Fingerprint of the request body. A reused key with a *different*
+    # body is a client bug and is rejected instead of replaying a stale
+    # response.
+    payload_hash: Mapped[Optional[str]] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
@@ -457,3 +461,14 @@ class RecoveryOutreachEvent(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False
     )
+
+
+# ---------------------------------------------------------------------------
+# Module 6 — Outbound Voice Agent
+# ---------------------------------------------------------------------------
+
+# The voice module keeps its models next to the module that owns them.
+# They are registered here so ``Base.metadata`` is complete for every
+# consumer (Alembic autogenerate, the test fixtures, ``create_all``)
+# regardless of which module was imported first.
+from app.modules.voice import models as voice_models  # noqa: E402,F401

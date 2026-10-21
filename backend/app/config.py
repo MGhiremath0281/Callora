@@ -6,14 +6,43 @@ production without code changes.
 """
 
 from functools import lru_cache
+import os
+from pathlib import Path
 from typing import Dict, List, Optional
 
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+#: ``backend/`` — the directory that holds the application package.
+_BACKEND_DIR = Path(__file__).resolve().parent.parent
+#: The repository root — the directory that holds ``docker-compose.yml`` and
+#: the shared ``.env`` file.
+_REPO_ROOT = _BACKEND_DIR.parent
+
+
+def _dotenv_files() -> tuple[str, ...]:
+    """The dotenv files to load, most general first.
+
+    The paths are resolved from the package location, not from the current
+    working directory, so the same file is read whether the app is started
+    from the repository root, from ``backend/``, or inside the container.
+
+    The test suite sets ``CALLORA_IGNORE_DOTENV=1`` so a developer's local
+    secrets can never influence a test run.
+    """
+    if os.getenv("CALLORA_IGNORE_DOTENV", "").strip().lower() in ("1", "true", "yes"):
+        return ()
+    # Later entries win, so ``backend/.env`` overrides the shared
+    # ``<repo>/.env``.
+    return (str(_REPO_ROOT / ".env"), str(_BACKEND_DIR / ".env"))
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="CALLORA_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="CALLORA_",
+        env_file=_dotenv_files(),
+        extra="ignore",
+    )
 
     # --- Database -------------------------------------------------------
     database_url: str = "postgresql+psycopg2://callora:callora@localhost:5432/callora"
@@ -211,6 +240,76 @@ class Settings(BaseSettings):
     # never hardcoded for all leads.
     default_outreach_language: str = "english"
 
+    # --- Outbound Voice Agent (Bolna) ------------------------------------
+    # Global kill switch for real outbound calling. While this is false the
+    # orchestrator performs the full compliance gate and persists a call
+    # record, but never contacts the voice provider. It must be explicitly
+    # enabled (and provider credentials provisioned) before money is spent.
+    voice_enable_outbound_calls: bool = False
+
+    # --- Redis (temporary state / rate limiting / caching) ---------------
+    # Redis is an accelerator, never the source of truth for a compliance
+    # decision: every check it supports has a PostgreSQL fallback.
+    redis_url: str = "redis://localhost:6379/0"
+    redis_enabled: bool = True
+    redis_key_prefix: str = "callora"
+    redis_socket_timeout_seconds: float = Field(default=1.0, gt=0.0, le=30.0)
+    # Per-business call-initiation rate limit (requests per minute).
+    voice_rate_limit_per_minute: int = Field(default=60, ge=1, le=10_000)
+    # TTL of the cached DND / business-config lookups.
+    voice_cache_ttl_seconds: int = Field(default=300, ge=1, le=86_400)
+
+    # --- Bolna (voice provider) ------------------------------------------
+    bolna_api_key: Optional[str] = None
+    bolna_base_url: str = "https://api.bolna.ai"
+    bolna_timeout_seconds: float = Field(default=20.0, gt=0.0, le=120.0)
+    # Shared secret used to verify webhook signatures. Bolna does not
+    # document an HMAC scheme for execution webhooks, so this is optional:
+    # when it is unset the webhook endpoint cannot verify signatures and
+    # only accepts requests from the documented Bolna source IPs (if
+    # configured). Set it to enable HMAC-SHA256 verification.
+    bolna_webhook_secret: Optional[str] = None
+    # Fallback agent id used when a business does not configure its own.
+    bolna_default_agent_id: Optional[str] = None
+    # Fallback caller id (E.164) used when a business does not configure one.
+    bolna_default_from_number: Optional[str] = None
+    # Default per-call timeouts used by the provider adapter.
+    voice_provider_max_attempts: int = Field(default=3, ge=1, le=10)
+    voice_provider_retry_backoff_seconds: float = Field(default=1.0, ge=0.0, le=60.0)
+
+    # --- Outbound calling policy defaults --------------------------------
+    # IANA timezone used to evaluate the permitted calling window.
+    voice_default_timezone: str = "Asia/Kolkata"
+    voice_default_calling_window_start: int = Field(default=10, ge=0, le=23)
+    voice_default_calling_window_end: int = Field(default=19, ge=0, le=23)
+    # Maximum number of outbound calls placed for one lead per calendar day
+    # in the business timezone.
+    voice_max_calls_per_lead_per_day: int = Field(default=1, ge=1, le=50)
+    # Maximum number of outbound calls placed per business per calendar day.
+    voice_max_calls_per_business_per_day: int = Field(default=500, ge=1, le=100_000)
+    # Maximum number of calls in flight for one business at the same time.
+    voice_max_concurrent_calls: int = Field(default=5, ge=1, le=1_000)
+    # Minimum gap between two calls to the same lead (anti-duplicate rule).
+    voice_duplicate_call_cooldown_minutes: int = Field(default=60, ge=0, le=10_080)
+    # Languages the voice pipeline is configured for. Used to validate
+    # per-call language selection (Hindi / Kannada / English).
+    voice_supported_languages: str = "en,hi,kn"
+    # Maximum transcript size (characters) handed to the post-call LLM.
+    voice_transcript_max_chars: int = Field(default=40_000, ge=500, le=400_000)
+
+    # --- Post-call AI workflow (LangGraph) -------------------------------
+    # "groq" uses the Groq chat model through LangChain; "langchain" uses
+    # whatever LangChain chat model is configured; "null" disables the LLM
+    # (the workflow then only records what the provider already extracted).
+    voice_llm_provider: str = "groq"
+    voice_llm_model: Optional[str] = None
+    voice_llm_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    voice_llm_timeout_seconds: float = Field(default=60.0, gt=0.0, le=600.0)
+    # Maximum number of post-call workflow attempts before a job is parked
+    # as permanently failed.
+    voice_job_max_attempts: int = Field(default=5, ge=1, le=50)
+    voice_job_retry_backoff_seconds: float = Field(default=10.0, ge=0.0, le=3_600.0)
+
     # --- Derived helpers -----------------------------------------------
 
     @field_validator("database_url")
@@ -256,6 +355,10 @@ class Settings(BaseSettings):
     @property
     def max_upload_size_bytes(self) -> int:
         return self.max_upload_size_mb * 1024 * 1024
+
+    @property
+    def voice_supported_language_set(self) -> set[str]:
+        return {s.strip().lower() for s in self.voice_supported_languages.split(",") if s.strip()}
 
 
 @lru_cache

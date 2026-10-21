@@ -16,6 +16,23 @@
       timeout: 5s
       retries: 10
 
+  # Redis is an accelerator for the outbound voice module (rate limiting,
+  # caching, temporary call state). It is never the source of truth: the
+  # backend keeps working — slower — when Redis is down.
+  redis:
+    image: redis:7-alpine
+    container_name: callora-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6380:6379"
+    volumes:
+      - callora_redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   backend:
     build:
       context: ./backend
@@ -35,6 +52,16 @@
       CALLORA_LOG_LEVEL: INFO
       # Optional LLM key for the recovery strategist; unset = rules-fallback.
       GROQ_API_KEY: ${GROQ_API_KEY:-}
+      # --- Outbound voice agent ---
+      CALLORA_REDIS_URL: redis://redis:6379/0
+      CALLORA_REDIS_ENABLED: "true"
+      CALLORA_BOLNA_API_KEY: ${CALLORA_BOLNA_API_KEY:-}
+      CALLORA_BOLNA_DEFAULT_AGENT_ID: ${CALLORA_BOLNA_DEFAULT_AGENT_ID:-}
+      CALLORA_BOLNA_DEFAULT_FROM_NUMBER: ${CALLORA_BOLNA_DEFAULT_FROM_NUMBER:-}
+      # Master switch for real outbound calling. Keep it false until the
+      # compliance policy and the provider account are ready.
+      CALLORA_VOICE_ENABLE_OUTBOUND_CALLS: ${CALLORA_VOICE_ENABLE_OUTBOUND_CALLS:-false}
+      CALLORA_VOICE_LLM_PROVIDER: ${CALLORA_VOICE_LLM_PROVIDER:-groq}
     volumes:
       - ./backend/app:/app/app
       - ./backend/alembic:/app/alembic
@@ -43,6 +70,37 @@
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # The background worker that drains the durable voice job queue
+  # (post-call analysis, retries, dead-letter handling).
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: callora-worker
+    environment:
+      CALLORA_DATABASE_URL: postgresql+psycopg2://callora:callora@db:5432/callora
+      CALLORA_API_KEYS: "biz_001:dev-key-biz-001"
+      CALLORA_LOG_LEVEL: INFO
+      CALLORA_REDIS_URL: redis://redis:6379/0
+      CALLORA_REDIS_ENABLED: "true"
+      CALLORA_BOLNA_API_KEY: ${CALLORA_BOLNA_API_KEY:-}
+      CALLORA_BOLNA_DEFAULT_AGENT_ID: ${CALLORA_BOLNA_DEFAULT_AGENT_ID:-}
+      CALLORA_BOLNA_DEFAULT_FROM_NUMBER: ${CALLORA_BOLNA_DEFAULT_FROM_NUMBER:-}
+      CALLORA_VOICE_ENABLE_OUTBOUND_CALLS: ${CALLORA_VOICE_ENABLE_OUTBOUND_CALLS:-false}
+      CALLORA_VOICE_LLM_PROVIDER: ${CALLORA_VOICE_LLM_PROVIDER:-groq}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+    volumes:
+      - ./backend/app:/app/app
+    command: ["python", "-m", "app.modules.voice.jobs.worker"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
 volumes:
   callora_pgdata:
+  callora_redisdata:

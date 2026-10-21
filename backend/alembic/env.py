@@ -12,6 +12,7 @@ from sqlalchemy import engine_from_config, pool
 from app.config import get_settings
 from app.db.base import Base
 from app import models  # noqa: F401  (register all tables on Base.metadata)
+from app.modules.voice import models as voice_models  # noqa: F401  (voice tables)
 
 config = context.config
 

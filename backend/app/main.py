@@ -4,6 +4,9 @@ Module 1 (Lead & Customer Import) exposes the lead and import routers on
 top of the existing health/root endpoints.
 Module 2 (CRM Synchronization) and agent query endpoints are registered
 under /api/v1.
+Module 6 (Outbound Voice Agent) registers the voice routers — business
+configuration, leads, calls, handoffs, operations and the provider
+webhooks — under /api/v1/voice.
 """
 
 from contextlib import asynccontextmanager
@@ -21,6 +24,12 @@ from app.modules.crm_sync import connection_seed
 from app.modules.crm_sync import router as crm_sync_api
 from app.modules.recovery_agent import router as recovery_agent_api
 from app.modules.recovery_dashboard import router as recovery_dashboard_api
+from app.modules.voice.api import businesses as voice_businesses_api
+from app.modules.voice.api import calls as voice_calls_api
+from app.modules.voice.api import handoffs as voice_handoffs_api
+from app.modules.voice.api import leads as voice_leads_api
+from app.modules.voice.api import ops as voice_ops_api
+from app.modules.voice.api import webhooks as voice_webhooks_api
 from app.db.session import get_session_factory
 
 API_PREFIX = "/api/v1"
@@ -44,12 +53,15 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Callora Backend",
-    version="0.4.0",
+    version="0.5.0",
     description=(
         "Callora platform API. Module 1: Lead & Customer Import – accepts "
         "CSV uploads and JSON/API submissions, maps them to the canonical "
         "lead schema, validates, deduplicates and persists records. "
-        "Module 2: automatic CRM synchronization and agent-ready data storage."
+        "Module 2: automatic CRM synchronization and agent-ready data storage. "
+        "Module 6: configurable outbound AI voice agent – compliance-gated "
+        "call initiation (Bolna), webhook intake, post-call analysis and "
+        "human handoff."
     ),
     lifespan=lifespan,
 )
@@ -64,6 +76,14 @@ app.include_router(crm_connections_api.router, prefix=API_PREFIX)
 app.include_router(agent_leads_api.router, prefix=API_PREFIX)
 app.include_router(recovery_agent_api.router, prefix=API_PREFIX)
 app.include_router(recovery_dashboard_api.router, prefix=API_PREFIX)
+
+# Outbound voice agent (Module 6).
+app.include_router(voice_businesses_api.router, prefix=API_PREFIX)
+app.include_router(voice_leads_api.router, prefix=API_PREFIX)
+app.include_router(voice_calls_api.router, prefix=API_PREFIX)
+app.include_router(voice_handoffs_api.router, prefix=API_PREFIX)
+app.include_router(voice_ops_api.router, prefix=API_PREFIX)
+app.include_router(voice_webhooks_api.router, prefix=API_PREFIX)
 
 
 @app.get("/")

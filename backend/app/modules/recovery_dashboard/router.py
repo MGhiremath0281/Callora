@@ -51,7 +51,14 @@ async def dashboard_summary(
     return dash_repo.dashboard_summary(db, business_id)
 
 
-@router.get("/cases", response_model=None)
+@router.get(
+    "/cases",
+    response_model=None,
+    # Unique operation id: this route shadows the recovery-agent route of
+    # the same name, and a duplicate operation id breaks OpenAPI client
+    # generators.
+    operation_id="dashboard_list_recovery_cases",
+)
 async def list_recovery_cases(
     credentials: Tuple[str, str] = Depends(business_credentials),
     case_status: Optional[str] = Query(default=None, alias="status"),
@@ -104,7 +111,11 @@ async def list_recovery_cases(
     }
 
 
-@router.get("/cases/{case_id}", response_model=None)
+@router.get(
+    "/cases/{case_id}",
+    response_model=None,
+    operation_id="dashboard_get_recovery_case",
+)
 async def get_recovery_case(
     case_id: str,
     credentials: Tuple[str, str] = Depends(business_credentials),

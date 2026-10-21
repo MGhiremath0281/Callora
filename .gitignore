@@ -5,4 +5,6 @@ __pycache__/
 .pytest_cache/
 .idea/
 .vscode/
+# The template is tracked; the real file never is.
 .env.example
+!.env.example
