@@ -107,7 +107,12 @@ class CallOrchestrator:
         )
         provider = self._provider or build_provider(settings=self._settings)
 
-        evaluation = self._evaluate(business, lead, provider, now)
+        # Whether the provider will actually be contacted. The gate needs to
+        # know this: for a simulated call the provider is never reached, so
+        # ``provider_ready`` is skipped instead of blocking.
+        simulated = bool(request.dry_run) or not self._settings.voice_enable_outbound_calls
+
+        evaluation = self._evaluate(business, lead, provider, now, simulated=simulated)
         decision = self._persist_decision(evaluation, request, business, lead)
         call = self._create_call(request, business, lead, evaluation, decision.id)
 
@@ -140,8 +145,13 @@ class CallOrchestrator:
             raise ComplianceBlockedError(blocked, decision_id=decision.id)
 
         # Allowed: place the call.
-        if request.dry_run or not self._settings.voice_enable_outbound_calls:
-            return self._simulate(call, request, evaluation, decision.id)
+        if simulated:
+            reason = (
+                "the request was a dry run"
+                if request.dry_run
+                else "outbound calling is disabled for this deployment"
+            )
+            return self._simulate(call, request, evaluation, decision.id, reason=reason)
 
         try:
             provider_request = self._build_provider_request(
@@ -231,6 +241,7 @@ class CallOrchestrator:
         lead,
         provider: VoiceProvider,
         now: datetime,
+        simulated: bool = False,
     ) -> ComplianceEvaluation:
         if business is None:
             return ComplianceEvaluation(
@@ -256,6 +267,7 @@ class CallOrchestrator:
             now=now,
             profile=profile,
             phone=normalize_phone(lead.phone) if lead is not None else None,
+            simulated=simulated,
         )
         return gate.evaluate(ctx)
 
@@ -339,15 +351,11 @@ class CallOrchestrator:
         request: CallRequest,
         evaluation: ComplianceEvaluation,
         decision_id: str,
+        reason: str = "outbound calling is disabled for this deployment",
     ) -> CallInitiationResult:
         """Record an allowed call without contacting the provider."""
         metadata = dict(call.call_metadata or {})
-        metadata.update(
-            {
-                "simulated": True,
-                "reason": "outbound calling is disabled for this deployment",
-            }
-        )
+        metadata.update({"simulated": True, "reason": reason})
         repo.update_call(
             self._session,
             call,

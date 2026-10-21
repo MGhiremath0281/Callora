@@ -164,6 +164,9 @@ Both are optional and the backend degrades explicitly:
 
 ### Smoke test (no provider, no call)
 
+No Bolna account is needed for this: a simulated call never reaches the
+provider, so the `provider_ready` check is skipped.
+
 ```bash
 curl -s http://localhost:8001/health
 # {"status":"healthy"}
@@ -174,6 +177,9 @@ curl -s -X POST http://localhost:8001/api/v1/voice/calls \
      -d '{"lead_id":"lead_xxx","dry_run":true}'
 # 201, "simulated": true — no provider was contacted
 ```
+
+(The request still needs a lead with a phone number and a voice consent
+record, otherwise the other checks of the gate block it.)
 
 ---
 
@@ -196,7 +202,7 @@ default; nothing is required to boot the service.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `CALLORA_BOLNA_API_KEY` | *(unset)* | Bolna API key. Without it the `provider_ready` check fails and every call is blocked. |
+| `CALLORA_BOLNA_API_KEY` | *(unset)* | Bolna API key. Without it every call that would actually be **placed** is blocked. A simulated call (dry run, or outbound calling disabled) skips the check — the provider is never contacted, so it has no credentials to check. |
 | `CALLORA_BOLNA_BASE_URL` | `https://api.bolna.ai` | API base URL. |
 | `CALLORA_BOLNA_TIMEOUT_SECONDS` | `20.0` | Per-request timeout for provider calls. |
 | `CALLORA_BOLNA_WEBHOOK_SECRET` | *(unset)* | Enables HMAC-SHA256 verification of webhook signatures. See [Webhook signature](#54-webhook-signature). |
@@ -268,11 +274,31 @@ endpoint that skips it.
 | 6 | `duplicate_call` | Another call to this lead is in flight, or the lead was called less than the cooldown ago. |
 | 7 | `quota` | The per-lead or per-business daily quota is exhausted. |
 | 8 | `concurrency` | The business already has `max_concurrent_calls` calls in flight. |
-| 9 | `provider_ready` | No agent id is configured, or the provider credentials are missing. |
+| 9 | `provider_ready` | No agent id is configured, or the provider credentials are missing. **Skipped for a simulated call** — the provider is never contacted, so it has no credentials to check. |
 
 **Fail closed.** Every check is wrapped: if it raises, the check is recorded
 as `error` with the reason code `check_unavailable` and the call is
 blocked. A check that cannot answer never answers "yes".
+
+### Simulated calls and `provider_ready`
+
+A call is *simulated* when `dry_run: true` is sent, or when
+`CALLORA_VOICE_ENABLE_OUTBOUND_CALLS` is `false`. In that mode the provider
+is never contacted, so `provider_ready` is reported as `skipped`
+(non-blocking) instead of failing:
+
+```json
+{"name": "provider_ready", "outcome": "skipped", "mandatory": false,
+ "reason": "the call will not be placed with the provider",
+ "details": {"provider": "bolna", "simulated": true}}
+```
+
+This is what lets a developer exercise the whole flow — gate, call record,
+webhooks, post-call analysis — from Swagger or curl **without a Bolna
+account**. The moment a call would really be placed the check is mandatory
+again: with outbound calling enabled and no credentials the request is
+still rejected with `403 compliance_blocked` /
+`provider_not_configured`, and no provider request is ever made.
 
 ### What a decision produces
 
@@ -673,19 +699,32 @@ python -m pytest tests/test_voice_api.py -q          # the HTTP layer
 python -m pytest -q                                  # everything
 ```
 
+> **Tip — the first import is slow.** On a cold file cache the very first
+> `import app.main` costs ~30 s (the machine has to read the interpreter's
+> bytecode and the packages from disk; Windows Defender scans them). It
+> drops to ~3 s once the cache is warm, so a "slow" run is usually a cold
+> one. The Groq/LLM stack is never imported at start-up — the import is
+> lazy and happens only when a post-call analysis actually calls a model.
+
 | File | Tests | Covers |
 |---|---|---|
-| `tests/test_voice_compliance.py` | 34 | Every mandatory check in isolation, fail-closed behaviour, DND, consent, calling window, quotas, concurrency, duplicate-call rules. |
-| `tests/test_voice_orchestrator.py` | 23 | Simulated / blocked / provider paths, the retry semantics, the audit trail, `refresh_status`. |
+| `tests/test_voice_compliance.py` | 39 | Every mandatory check in isolation, fail-closed behaviour, DND, consent, calling window, quotas, concurrency, duplicate-call rules, and `provider_ready` in simulated vs. placed mode. |
+| `tests/test_voice_orchestrator.py` | 29 | Simulated / blocked / provider paths, the retry semantics, the audit trail, `refresh_status`, provider credentials. |
 | `tests/test_voice_webhooks.py` | 23 | Applying events, dedupe, out-of-order delivery, the post-call job, signature verification, the pre-transfer event. |
 | `tests/test_voice_jobs.py` | 23 | Enqueue, dedupe key, atomic claim, retries, backoff, dead jobs, stale release, the worker. |
 | `tests/test_voice_postcall.py` | 15 | The LangGraph workflow, qualification, refusals, handoff creation, the degradation path. |
-| `tests/test_voice_api.py` | 70 | Authentication, call initiation, idempotency, the 409 conflict, the rate limit, the webhook endpoints, the handoffs, the ops endpoints, the business configuration, consent and DND. |
+| `tests/test_voice_api.py` | 73 | Authentication, call initiation, idempotency, the 409 conflict, the rate limit, the webhook endpoints, the handoffs, the ops endpoints, the business configuration, consent and DND. |
+
+The whole suite (692 tests, including the legacy modules) runs in about
+**2m37s**. The schema is built once per session and every test starts from
+a copy of it — creating all 23 tables per test instead cost ~110 ms each.
 
 ### 9.2 Manual testing with curl
 
 With `CALLORA_VOICE_ENABLE_OUTBOUND_CALLS=false` (the default), the whole
-flow can be exercised without spending money:
+flow can be exercised without spending money **and without a Bolna
+account** — a simulated call never reaches the provider, so the
+`provider_ready` check is skipped:
 
 ```bash
 export BASE=http://localhost:8001

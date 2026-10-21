@@ -225,6 +225,91 @@ class TestProviderCall:
 
 
 # ---------------------------------------------------------------------------
+# Provider credentials
+# ---------------------------------------------------------------------------
+
+
+class TestProviderCredentials:
+    """``provider_ready`` only blocks a call that would really be placed.
+
+    A simulated call never reaches the provider, so missing credentials
+    cannot cause a real-world problem and the check is skipped. The moment
+    the provider would be contacted the check is mandatory again.
+    """
+
+    def test_a_simulated_call_does_not_need_credentials(
+        self, voice_settings, db, voice_business, voice_lead, voice_consent
+    ):
+        """Outbound calling is off in this fixture: no credentials needed."""
+        provider = FakeProvider(configured=False)
+        orchestrator = CallOrchestrator(voice_settings, db, provider=provider)
+        result = orchestrator.initiate(_request())
+        assert result.simulated is True
+        assert result.evaluation.decision == ComplianceDecision.ALLOWED
+        assert provider.start_calls == []
+
+    def test_a_simulated_call_reports_the_check_as_skipped(
+        self, voice_settings, db, voice_business, voice_lead, voice_consent
+    ):
+        provider = FakeProvider(configured=False)
+        orchestrator = CallOrchestrator(voice_settings, db, provider=provider)
+        result = orchestrator.initiate(_request())
+        provider_ready = next(
+            c for c in result.evaluation.checks if c.name == "provider_ready"
+        )
+        assert provider_ready.outcome == "skipped"
+        assert provider_ready.mandatory is False
+
+    def test_a_real_call_still_needs_credentials(
+        self, voice_settings, db, voice_business, voice_lead, voice_consent
+    ):
+        """Outbound calling enabled and no credentials: the call is blocked."""
+        voice_settings.voice_enable_outbound_calls = True
+        provider = FakeProvider(configured=False)
+        orchestrator = CallOrchestrator(voice_settings, db, provider=provider)
+        with pytest.raises(ComplianceBlockedError) as excinfo:
+            orchestrator.initiate(_request())
+        assert excinfo.value.status_code == 403
+        assert "provider_not_configured" in excinfo.value.summary
+        assert provider.start_calls == []
+
+    def test_a_real_call_needs_a_voice_agent(
+        self, voice_settings, db, voice_business, voice_lead, voice_consent
+    ):
+        voice_settings.voice_enable_outbound_calls = True
+        voice_settings.bolna_default_agent_id = None
+        voice_business.bolna_agent_id = None
+        db.commit()
+        provider = FakeProvider()
+        orchestrator = CallOrchestrator(voice_settings, db, provider=provider)
+        with pytest.raises(ComplianceBlockedError):
+            orchestrator.initiate(_request())
+        assert provider.start_calls == []
+
+    def test_a_dry_run_does_not_need_credentials(
+        self, voice_settings, db, voice_business, voice_lead, voice_consent
+    ):
+        """A dry run in a live deployment still never reaches the provider."""
+        voice_settings.voice_enable_outbound_calls = True
+        provider = FakeProvider(configured=False)
+        orchestrator = CallOrchestrator(voice_settings, db, provider=provider)
+        result = orchestrator.initiate(_request(dry_run=True))
+        assert result.simulated is True
+        assert provider.start_calls == []
+
+    def test_the_simulated_reason_is_recorded(
+        self, voice_settings, db, voice_business, voice_lead, voice_consent
+    ):
+        provider = FakeProvider(configured=False)
+        orchestrator = CallOrchestrator(voice_settings, db, provider=provider)
+        result = orchestrator.initiate(_request())
+        assert (result.call.call_metadata or {}).get("simulated") is True
+        assert "outbound calling is disabled" in (
+            result.call.call_metadata or {}
+        ).get("reason", "")
+
+
+# ---------------------------------------------------------------------------
 # Provider failures
 # ---------------------------------------------------------------------------
 

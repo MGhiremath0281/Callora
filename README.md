@@ -84,13 +84,33 @@ required to boot the service.
 | `CALLORA_API_KEYS` | `biz_001:dev-key-biz-001` | `business_id:api_key` pairs → resolves `X-API-Key`. |
 | `CALLORA_LOG_LEVEL` | `INFO` | Root log level. |
 | `CALLORA_VOICE_ENABLE_OUTBOUND_CALLS` | `false` | **Master switch** for real outbound calling. |
-| `CALLORA_BOLNA_API_KEY` | *(unset)* | Bolna API key. Without it every call is blocked. |
+| `CALLORA_BOLNA_API_KEY` | *(unset)* | Bolna API key. Only needed for calls that are actually placed — a simulated call skips the check. |
 | `CALLORA_REDIS_URL` | `redis://localhost:6379/0` | Connection URL for the accelerator. |
 | `CALLORA_VOICE_LLM_PROVIDER` | `groq` | `groq`, `langchain`, or `null` (no model). |
 | `GROQ_API_KEY` | *(unset)* | Key for the Groq client. |
 
 The complete reference — every voice, Bolna, Redis and LLM variable — lives
 in [`docs/voice-agent.md`](docs/voice-agent.md#3-configuration-reference).
+
+### Provider credentials
+
+**Plivo is not implemented** — Bolna is the only voice provider, and the
+provider registry is the seam for adding another.
+
+A Bolna API key and a voice agent id are needed only for calls that are
+*actually placed*:
+
+| Mode | `CALLORA_VOICE_ENABLE_OUTBOUND_CALLS` | Bolna key | Result |
+|---|---|---|---|
+| Simulated | `false` | not needed | `201` — the call is recorded, no provider is contacted, ₹0 |
+| Real | `true` | required | `201` — Bolna places the call and bills the minutes |
+
+With the switch on and no credentials the request is rejected with
+`403 compliance_blocked` / `provider_not_configured` — the gate never lets
+an unconfigured deployment reach a provider. With the switch off (or
+`dry_run: true`) the `provider_ready` check is reported as `skipped`, so
+the whole flow can be exercised from Swagger or curl without a Bolna
+account.
 
 ---
 

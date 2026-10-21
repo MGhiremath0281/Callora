@@ -1279,12 +1279,24 @@ curl -s -X POST $BASE/api/v1/voice/calls -H "$H" \
   "compliance_decision_id": "cd_41a0...",
   "compliance_decision": "allowed",
   "compliance_checks": [
-    {"name": "consent", "outcome": "passed", "mandatory": true, "reason": "voice consent is on record"}
+    {"name": "consent", "outcome": "passed", "mandatory": true, "reason": "voice consent is on record"},
+    {"name": "provider_ready", "outcome": "skipped", "mandatory": false,
+     "reason": "the call will not be placed with the provider",
+     "details": {"provider": "bolna", "simulated": true}}
   ],
   "simulated": true,
   "message": "the call was recorded as simulated; no provider was contacted"
 }
 ```
+
+> **No Bolna account is needed for this guide.** A simulated call never
+> reaches the provider, so the `provider_ready` check is reported as
+> `skipped` instead of failing — missing credentials could only stop the
+> provider from being contacted, which is not a compliance problem. The
+> moment a call would really be placed the check is mandatory again: with
+> `CALLORA_VOICE_ENABLE_OUTBOUND_CALLS=true` and no credentials the
+> request is rejected with `403` / `provider_not_configured` and no
+> provider request is ever made.
 
 **Idempotency** — repeat the exact same request with the same key:
 
@@ -1333,7 +1345,8 @@ decision is persisted, so the refusal is auditable.
 The nine mandatory checks are: `business_active`, `lead_exists`, `consent`,
 `dnd`, `calling_hours`, `duplicate_call`, `quota`, `concurrency` and
 `provider_ready`. **Any one of them fails → the call is blocked.** A check
-that cannot be evaluated also blocks.
+that cannot be evaluated also blocks. The only exception is
+`provider_ready` on a simulated call, which is `skipped` (see Step 5).
 
 Other status codes: `401` (missing/invalid API key), `404` (unknown lead or
 call), `409` (`idempotency_conflict`), `422` (validation), `429`
@@ -1475,12 +1488,12 @@ never authoritative for any of it.
 
 ### Tests added
 
-- `tests/test_voice_compliance.py` (34) — every mandatory check in isolation, fail-closed behaviour, DND, consent, calling window, quotas, concurrency, duplicate-call rules.
-- `tests/test_voice_orchestrator.py` (23) — simulated / blocked / provider paths, retry semantics, the audit trail, `refresh_status`.
+- `tests/test_voice_compliance.py` (39) — every mandatory check in isolation, fail-closed behaviour, DND, consent, calling window, quotas, concurrency, duplicate-call rules, and `provider_ready` in simulated vs. placed mode.
+- `tests/test_voice_orchestrator.py` (29) — simulated / blocked / provider paths, retry semantics, the audit trail, `refresh_status`, provider credentials.
 - `tests/test_voice_webhooks.py` (23) — applying events, dedupe, out-of-order delivery, the post-call job, signature verification, the pre-transfer event.
 - `tests/test_voice_jobs.py` (23) — enqueue, dedupe key, atomic claim, retries, backoff, dead jobs, stale release, the worker.
 - `tests/test_voice_postcall.py` (15) — the LangGraph workflow, qualification, refusals, handoff creation, the degradation path.
-- `tests/test_voice_api.py` (70) — authentication, call initiation, idempotency, the 409 conflict, the rate limit, the webhook endpoints, the handoffs, the ops endpoints, the business configuration, consent and DND.
+- `tests/test_voice_api.py` (73) — authentication, call initiation, idempotency, the 409 conflict, the rate limit, the webhook endpoints, the handoffs, the ops endpoints, the business configuration, consent and DND.
 
 The suite is offline by construction: the provider is a `FakeProvider`, the
 model is a `ScriptedLLM`, and outbound calling is switched off in the fixture.
@@ -1559,4 +1572,5 @@ POST /api/v1/voice/webhooks/bolna/pre-transfer
 - Post-call intelligence: LangGraph workflow (`load_context → extract_qualification → classify_refusal → summarize → build_handoff → persist`) producing a summary, qualification result, refusal category, follow-up actions and a human handoff briefing; degrades to the provider payload when no LLM is configured.
 - Background work runs on a **durable PostgreSQL job queue** (atomic claim, `skip_locked`, exponential backoff, dead-letter + manual retry), drained by `python -m app.modules.voice.jobs.worker`.
 - **No real call is placed by default** — `CALLORA_VOICE_ENABLE_OUTBOUND_CALLS=false` makes every accepted call `simulated`. Enabling it is a documented, deliberate step (see [`docs/voice-agent.md`](docs/voice-agent.md#7-enabling-real-calling)).
-- Full suite green — **678 tests passed** (including the 188 new voice tests); ruff clean.
+- `provider_ready` is **skipped for a simulated call** (dry run, or outbound calling disabled): the provider is never contacted, so it has no credentials to check. It stays mandatory the moment a call would really be placed — with the switch on and no credentials the request is still `403` / `provider_not_configured`. Plivo is not implemented and needs no key.
+- Full suite green — **692 tests passed** (including the 202 voice tests); ruff clean. The suite runs in ~2m37s: the schema is built once per session and each test starts from a copy of it (building it per test cost ~110 ms × 692).

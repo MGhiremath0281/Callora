@@ -48,7 +48,7 @@ def provider():
     return FakeProvider()
 
 
-def _gate(settings, db, business, lead, provider, now=VOICE_NOON_UTC, dnd_lookup=None):
+def _gate(settings, db, business, lead, provider, now=VOICE_NOON_UTC, dnd_lookup=None, simulated=False):
     """Evaluate the gate for one business/lead pair."""
     return evaluate_call(
         settings,
@@ -58,6 +58,7 @@ def _gate(settings, db, business, lead, provider, now=VOICE_NOON_UTC, dnd_lookup
         provider,
         now=now,
         dnd_lookup=dnd_lookup,
+        simulated=simulated,
     )
 
 
@@ -155,6 +156,82 @@ class TestConfigurationRules:
         evaluation = _gate(voice_settings, db, voice_business, voice_lead, provider)
         assert evaluation.decision == ComplianceDecision.BLOCKED
         assert ReasonCode.PROVIDER_NOT_CONFIGURED in _reason_codes(evaluation)
+
+    def test_provider_is_not_ready_blocks_a_call_that_would_be_placed(
+        self, voice_settings, db, voice_business, voice_lead, voice_consent
+    ):
+        """A call that really reaches the provider needs credentials."""
+        unconfigured = FakeProvider(configured=False)
+        evaluation = _gate(
+            voice_settings, db, voice_business, voice_lead, unconfigured, simulated=False
+        )
+        assert evaluation.decision == ComplianceDecision.BLOCKED
+        assert ReasonCode.PROVIDER_NOT_CONFIGURED in _reason_codes(evaluation)
+
+
+# ---------------------------------------------------------------------------
+# provider_ready in simulated mode
+# ---------------------------------------------------------------------------
+
+
+class TestProviderReadyInSimulatedMode:
+    """A simulated call never reaches the provider.
+
+    Missing credentials are therefore not a compliance problem — they could
+    only stop the provider from being contacted. The check is reported as
+    *skipped* instead of blocking, so a developer can exercise the whole
+    flow without provider credentials. A call that really is placed still
+    requires them (see
+    ``TestConfigurationRules.test_provider_is_not_ready_blocks_a_call_that_would_be_placed``).
+    """
+
+    def test_the_check_is_skipped(
+        self, voice_settings, db, voice_business, voice_lead, voice_consent
+    ):
+        unconfigured = FakeProvider(configured=False)
+        evaluation = _gate(
+            voice_settings, db, voice_business, voice_lead, unconfigured, simulated=True
+        )
+        provider_ready = _check(evaluation, "provider_ready")
+        assert provider_ready.outcome == CheckOutcome.SKIPPED
+        assert provider_ready.mandatory is False
+
+    def test_a_missing_voice_agent_does_not_block(
+        self, voice_settings, db, voice_business, voice_lead, voice_consent, provider
+    ):
+        voice_business.bolna_agent_id = None
+        voice_settings.bolna_default_agent_id = None
+        db.commit()
+        evaluation = _gate(
+            voice_settings, db, voice_business, voice_lead, provider, simulated=True
+        )
+        assert evaluation.decision == ComplianceDecision.ALLOWED
+        assert evaluation.blocked_reasons == []
+
+    def test_the_other_checks_still_block(
+        self, voice_settings, db, voice_business, voice_lead, provider
+    ):
+        """Skipping provider_ready never relaxes the rest of the gate."""
+        unconfigured = FakeProvider(configured=False)
+        evaluation = _gate(
+            voice_settings, db, voice_business, voice_lead, unconfigured, simulated=True
+        )
+        # No consent record for this lead.
+        assert evaluation.decision == ComplianceDecision.BLOCKED
+        assert ReasonCode.CONSENT_MISSING in _reason_codes(evaluation)
+
+    def test_the_decision_is_auditable(
+        self, voice_settings, db, voice_business, voice_lead, voice_consent
+    ):
+        """The skipped check is still reported, so the decision is explainable."""
+        unconfigured = FakeProvider(configured=False)
+        evaluation = _gate(
+            voice_settings, db, voice_business, voice_lead, unconfigured, simulated=True
+        )
+        assert {c.name for c in evaluation.checks} == set(CHECK_NAMES)
+        skipped = [c for c in evaluation.checks if c.outcome == CheckOutcome.SKIPPED]
+        assert [c.name for c in skipped] == ["provider_ready"]
+        assert "simulated" in _check(evaluation, "provider_ready").details
 
 
 # ---------------------------------------------------------------------------

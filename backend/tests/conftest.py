@@ -6,10 +6,12 @@ PostgreSQL). Each test gets an isolated database file.
 """
 
 import os
+import shutil
 from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 # Ensure deterministic test settings before the app module is imported.
@@ -17,7 +19,7 @@ os.environ.setdefault("CALLORA_DEBUG", "true")
 
 from app.config import get_settings  # noqa: E402
 from app.db.base import Base  # noqa: E402
-from app.db.session import get_db, get_engine, get_session_factory, reset_engine  # noqa: E402
+from app.db.session import get_db, get_session_factory, reset_engine  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models import Lead  # noqa: E402
 from app.modules.voice import repository as voice_repo  # noqa: E402
@@ -36,15 +38,35 @@ VOICE_PHONE = "+919876543210"
 VOICE_NOON_UTC = datetime(2026, 3, 11, 6, 30, tzinfo=timezone.utc)
 
 
+@pytest.fixture(scope="session")
+def schema_template(tmp_path_factory):
+    """Build the database schema once for the whole test session.
+
+    Creating every table for every test is the single largest cost in the
+    suite (~110 ms each). SQLite makes it cheap to avoid: the schema is
+    built once into a template file and every test starts from a copy of
+    it. The copy is a few hundred kilobytes and takes about a millisecond.
+    """
+    path = tmp_path_factory.mktemp("schema") / "template.db"
+    engine = create_engine(
+        f"sqlite:///{path}", connect_args={"check_same_thread": False}
+    )
+    try:
+        Base.metadata.create_all(engine)
+    finally:
+        engine.dispose()
+    return path
+
+
 @pytest.fixture()
-def settings(tmp_path, monkeypatch):
+def settings(tmp_path, monkeypatch, schema_template):
     db_path = tmp_path / "test.db"
+    shutil.copyfile(schema_template, db_path)
     monkeypatch.setenv("CALLORA_DATABASE_URL", f"sqlite:///{db_path}")
     monkeypatch.setenv("CALLORA_API_KEYS", f"{BIZ_1}:{KEY_1},{BIZ_2}:{KEY_2}")
     monkeypatch.setenv("CALLORA_DEBUG", "true")
     get_settings.cache_clear()
     reset_engine()
-    Base.metadata.create_all(get_engine())
     current = get_settings()
     yield current
     reset_engine()

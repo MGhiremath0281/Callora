@@ -91,6 +91,11 @@ class ComplianceContext:
     now: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     profile: Optional[VoiceLeadProfile] = None
     phone: Optional[str] = None
+    #: True when the call will **not** be placed with a provider (a dry run,
+    #: or a deployment where outbound calling is switched off). The provider
+    #: is never contacted in that case, so ``provider_ready`` is reported as
+    #: skipped instead of blocking the call.
+    simulated: bool = False
 
 
 @dataclass
@@ -557,6 +562,18 @@ class ComplianceGate:
 
     def _check_provider_ready(self, ctx: ComplianceContext) -> CheckResult:
         business = ctx.business
+        if ctx.simulated:
+            # The provider is not contacted for a simulated call, so missing
+            # credentials are not a compliance problem — they would only
+            # stop the provider from being reached. The check is reported
+            # as skipped so the decision still shows why it did not apply.
+            return CheckResult(
+                name="provider_ready",
+                outcome=CheckOutcome.SKIPPED,
+                mandatory=False,
+                reason="the call will not be placed with the provider",
+                details={"provider": ctx.provider.name, "simulated": True},
+            )
         agent_id = business.bolna_agent_id or self._settings.bolna_default_agent_id
         if not agent_id:
             return CheckResult(
@@ -593,8 +610,16 @@ def evaluate_call(
     provider: VoiceProvider,
     now: Optional[datetime] = None,
     dnd_lookup: Optional[DndLookup] = None,
+    simulated: bool = False,
 ) -> ComplianceEvaluation:
-    """Convenience wrapper around :class:`ComplianceGate`."""
+    """Convenience wrapper around :class:`ComplianceGate`.
+
+    ``simulated`` says whether the call would actually reach the provider.
+    It defaults to ``False`` — the strict interpretation, in which
+    ``provider_ready`` is mandatory — so a caller has to opt in to the
+    relaxed behaviour explicitly. The orchestrator is the only production
+    caller and it passes the real value.
+    """
     gate = ComplianceGate(settings, session, dnd_lookup=dnd_lookup)
     profile = (
         repo.get_lead_profile(session, business.id, lead.id) if lead is not None else None
@@ -606,6 +631,7 @@ def evaluate_call(
         now=now or datetime.now(timezone.utc),
         profile=profile,
         phone=normalize_phone(lead.phone) if lead is not None else None,
+        simulated=simulated,
     )
     return gate.evaluate(ctx)
 

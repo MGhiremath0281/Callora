@@ -101,7 +101,16 @@ class TestCallInitiation:
         checks = response.json()["compliance_checks"]
         names = {c["name"] for c in checks}
         assert {"consent", "dnd", "calling_hours", "provider_ready"} <= names
-        assert all(c["outcome"] == "passed" for c in checks)
+        # Every check except ``provider_ready`` passes. That one is skipped
+        # because the call is simulated: the provider is never contacted, so
+        # it has no credentials to check.
+        by_name = {c["name"]: c for c in checks}
+        assert by_name["provider_ready"]["outcome"] == "skipped"
+        assert all(
+            c["outcome"] == "passed"
+            for name, c in by_name.items()
+            if name != "provider_ready"
+        )
 
     def test_an_unknown_lead_is_a_404(self, voice_client, ready):
         response = voice_client.post(
@@ -109,6 +118,49 @@ class TestCallInitiation:
         )
         assert response.status_code == 404
         assert response.json()["error"]["code"] == "lead_not_found"
+
+    def test_a_call_without_provider_credentials_is_simulated(
+        self, voice_settings, voice_client, ready
+    ):
+        """No Bolna key, but the call is simulated: nothing is dialled.
+
+        The provider is never contacted for a simulated call, so missing
+        credentials cannot cause a real-world problem.
+        """
+        voice_settings.bolna_api_key = None
+        response = voice_client.post(CALLS, json=_payload(), headers=auth_headers())
+        assert response.status_code == 201, response.text
+        body = response.json()
+        assert body["simulated"] is True
+        assert body["compliance_decision"] == "allowed"
+        provider_ready = next(
+            c for c in body["compliance_checks"] if c["name"] == "provider_ready"
+        )
+        assert provider_ready["outcome"] == "skipped"
+        assert provider_ready["mandatory"] is False
+
+    def test_a_call_without_provider_credentials_is_blocked_when_outbound_is_enabled(
+        self, voice_settings, voice_client, ready
+    ):
+        """With outbound calling enabled the credentials are mandatory."""
+        voice_settings.bolna_api_key = None
+        voice_settings.voice_enable_outbound_calls = True
+        response = voice_client.post(CALLS, json=_payload(), headers=auth_headers())
+        assert response.status_code == 403
+        reasons = [r["reason_code"] for r in response.json()["error"]["details"]]
+        assert "provider_not_configured" in reasons
+
+    def test_a_call_without_a_voice_agent_is_blocked_when_outbound_is_enabled(
+        self, voice_settings, voice_client, voice_business, voice_lead, voice_consent, db
+    ):
+        voice_settings.voice_enable_outbound_calls = True
+        voice_settings.bolna_default_agent_id = None
+        voice_business.bolna_agent_id = None
+        db.commit()
+        response = voice_client.post(CALLS, json=_payload(), headers=auth_headers())
+        assert response.status_code == 403
+        reasons = [r["reason_code"] for r in response.json()["error"]["details"]]
+        assert "provider_not_configured" in reasons
 
     def test_a_malformed_request_is_a_422(self, voice_client, ready):
         response = voice_client.post(CALLS, json={}, headers=auth_headers())
