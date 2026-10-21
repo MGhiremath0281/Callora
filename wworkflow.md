@@ -1,17 +1,29 @@
 # Callora — Workflow & Endpoint Testing Guide
 
-How to test **all 15 business endpoints** and the full end-to-end workflow:
+How to test the business endpoints and the full end-to-end workflow:
 
 ```
 CSV upload → map & standardize → validate & deduplicate → persist leads
            → check CRM connection → synchronize conditionally
            → expose agent-ready leads
            → recovery agent detects neglected leads → recovery cases
+           → (Module 6) compliance gate → outbound call → webhook → post-call AI → handoff
 ```
 
 Every expected response in this guide was produced by **actually running the
 workflow** against a scratch database — not copied from design docs.
 IDs (`imp_…`, `lead_…`, `CRM-…`) vary per run.
+
+The guide covers:
+
+| Part | Module | Starts at |
+|---|---|---|
+| A | 1–2 — Lead import & CRM sync | [Section 3](#3-part-a--end-to-end-workflow-without-a-crm-connection) |
+| B | 1–2 — With a CRM connection | [Section 4](#4-part-b--end-to-end-workflow-with-a-crm-connection) |
+| C | 3 — Recovery agent | [Section 4B](#4b-part-c--module-3-recovery-agent-opportunity-detection) |
+| D | 5 — Priority scoring | [Section 4D](#4d-part-d--module-5-priority-scoring) |
+| E | Recovery dashboard | [Section 9](#9-part-e--recovery-dashboard-modules-1-5--ai-outreach) |
+| F | 6 — Outbound voice agent | [Section 10](#10-part-f--outbound-voice-agent-module-6) |
 
 ---
 
@@ -79,6 +91,11 @@ still exactly 15 routes.
 *inside* the same sweep, persists on the same `recovery_cases` rows, and
 is exposed through backward-compatible extensions of the two recovery
 endpoints (see Part D). The allowlist is still exactly 15 routes.
+
+**Module 6 (Outbound Voice Agent) lives under its own prefix**
+(`/api/v1/voice/*`) and adds 24 paths / 30 operations — it is a separate
+subsystem with its own auth, its own compliance gate and its own operator
+views (see Part F). The 15-route allowlist above is unchanged.
 
 **All routes live under `/api/v1` exactly once.** There are no unversioned
 aliases (`/leads`, `/imports/...`) and no `/leads/import/preview` endpoint.
@@ -1058,6 +1075,426 @@ Migrations run automatically on startup in compose (`alembic upgrade head`). For
 - The automated grounding scan is pattern-based and English-focused; for other languages the prompt rules are the primary control. Only `hindi`/`english` deterministic templates are supported — other lead languages fall back to `CALLORA_DEFAULT_OUTREACH_LANGUAGE`.
 
 
+---
+
+## 10. Part F — Outbound Voice Agent (Module 6)
+
+Module 6 turns a lead into an actual phone call: it runs a **fail-closed
+compliance gate**, places the call through Bolna, ingests the provider
+webhooks, and turns the conversation into structured intelligence (summary,
+qualification result, refusal category, follow-up actions) plus a briefing
+for a human when the lead has to be handed over.
+
+Everything is backend — there is no frontend in this milestone. The full
+reference is [`docs/voice-agent.md`](docs/voice-agent.md).
+
+> **Nothing is dialled during this guide.**
+> `CALLORA_VOICE_ENABLE_OUTBOUND_CALLS=false` is the default, so an allowed
+> call is recorded as `simulated` and **no provider is contacted**. The
+> responses below are what the API actually returns in that mode.
+
+### The flow
+
+```
+POST /api/v1/voice/calls
+      │
+      ▼
+  ComplianceGate  ── blocked ─▶ 403 compliance_blocked  (decision + audit written)
+      │ allowed
+      ▼
+  call row created ──▶ provider contacted ──▶ status "simulated" (or a real provider id)
+      │
+      │  webhook (Bolna execution events)
+      ▼
+  dedupe + ordering ──▶ voice_jobs ──▶ worker ──▶ LangGraph post-call workflow
+                                                    └▶ call_outcomes + handoffs
+```
+
+### New API routes (mounted under `/api/v1/voice`)
+
+| Method | Route | Purpose |
+|---|--------|---------|
+| GET | `/api/v1/voice/business` | Read the voice configuration (created on first read) |
+| PATCH | `/api/v1/voice/business` | Change the voice configuration (audited) |
+| GET | `/api/v1/voice/leads` | List the leads with their voice state |
+| GET | `/api/v1/voice/leads/{lead_id}` | Read the voice state of one lead |
+| PUT | `/api/v1/voice/leads/{lead_id}/profile` | Change the voice state (`do_not_call`, language, notes) |
+| GET | `/api/v1/voice/leads/{lead_id}/consent` | Read every consent record |
+| PUT | `/api/v1/voice/leads/{lead_id}/consent` | Record the consent evidence |
+| GET | `/api/v1/voice/dnd` | List the do-not-disturb registry |
+| POST | `/api/v1/voice/dnd` | Add a number to the registry |
+| DELETE | `/api/v1/voice/dnd/{entry_id}` | Deactivate an entry (never deleted — the history stays auditable) |
+| POST | `/api/v1/voice/calls` | **Request an outbound call** — runs the compliance gate |
+| GET | `/api/v1/voice/calls` | List the calls of the business |
+| GET | `/api/v1/voice/calls/{call_id}` | Read one call |
+| GET | `/api/v1/voice/calls/{call_id}/events` | Read the provider events that were applied |
+| GET | `/api/v1/voice/calls/{call_id}/outcome` | Read the structured post-call outcome |
+| POST | `/api/v1/voice/calls/{call_id}/refresh` | Re-read the state from the provider (recovery path for a missed webhook) |
+| POST | `/api/v1/voice/calls/{call_id}/cancel` | Cancel a call that has not started yet |
+| POST | `/api/v1/voice/calls/{call_id}/postcall` | Re-queue the post-call workflow |
+| GET | `/api/v1/voice/handoffs` | List the handoffs |
+| GET | `/api/v1/voice/handoffs/{handoff_id}` | Read one handoff |
+| POST | `/api/v1/voice/handoffs` | Ask a salesperson to call a lead back |
+| PATCH | `/api/v1/voice/handoffs/{handoff_id}` | Update the status / outcome of a handoff |
+| GET | `/api/v1/voice/ops/stats` | Summary of the voice activity |
+| GET | `/api/v1/voice/ops/jobs` | List the background jobs |
+| GET | `/api/v1/voice/ops/jobs/{job_id}` | Read one background job |
+| POST | `/api/v1/voice/ops/jobs/{job_id}/retry` | Re-queue a dead job (audited) |
+| GET | `/api/v1/voice/ops/audit` | Read the audit trail |
+| GET | `/api/v1/voice/ops/compliance-decisions` | Read the persisted compliance decisions |
+| POST | `/api/v1/voice/webhooks/bolna/execution` | **Provider webhook** — call lifecycle events (no `X-API-Key`) |
+| POST | `/api/v1/voice/webhooks/bolna/pre-transfer` | **Provider webhook** — warm-transfer events (no `X-API-Key`) |
+
+24 paths, 30 operations. Everything except the two webhooks requires
+`X-API-Key` and is business-scoped — another tenant gets `404`, never
+another tenant's data.
+
+### New configuration
+
+All variables are optional and have working defaults (see
+[`docs/voice-agent.md`](docs/voice-agent.md#3-configuration-reference) for the
+complete reference).
+
+```bash
+export CALLORA_REDIS_ENABLED=true
+export CALLORA_REDIS_URL=redis://localhost:6380/0       # Compose port; 6379 = local
+export CALLORA_BOLNA_API_KEY=                            # unset -> every call is blocked
+export CALLORA_BOLNA_DEFAULT_AGENT_ID=
+export CALLORA_BOLNA_DEFAULT_FROM_NUMBER=
+export CALLORA_VOICE_ENABLE_OUTBOUND_CALLS=false          # master switch
+export CALLORA_VOICE_LLM_PROVIDER=groq                   # or "null" for no model
+export GROQ_API_KEY=
+```
+
+Docker Compose gained two services: `redis` (host port `6380` — `6379` was
+already taken) and `worker` (`python -m app.modules.voice.jobs.worker`).
+
+### Step 1 — Read the voice configuration
+
+```bash
+curl -s $BASE/api/v1/voice/business -H "$H"
+```
+
+```json
+{
+  "business_id": "biz_001",
+  "name": "biz_001",
+  "timezone": "Asia/Kolkata",
+  "default_language": "en",
+  "supported_languages": ["en", "hi", "kn"],
+  "calling_window_start": 10,
+  "calling_window_end": 19,
+  "calling_days": [],
+  "max_calls_per_lead_per_day": 1,
+  "max_calls_per_business_per_day": 500,
+  "max_concurrent_calls": 5,
+  "require_consent": true,
+  "dnd_enabled": true,
+  "warm_transfer_enabled": false,
+  "is_active": true,
+  "outbound_calls_enabled": false,
+  "provider_configured": false
+}
+```
+
+The row is created on first read. `provider_configured: false` means no
+Bolna key is present — the `provider_ready` check then fails and every call
+is blocked (see Step 6).
+
+### Step 2 — Widen the calling window (optional)
+
+The default window is 10:00–19:00 IST. To call at any hour while testing:
+
+```bash
+curl -s -X PATCH $BASE/api/v1/voice/business -H "$H" \
+     -H "Content-Type: application/json" \
+     -d '{"calling_window_start":0,"calling_window_end":24}'
+```
+
+`start == end` means "no restriction". The change is written to the audit
+trail as `business.config_updated`.
+
+### Step 3 — The voice state of a lead
+
+Module 1 leads are reused as-is; the voice module adds a profile row.
+
+```bash
+curl -s $BASE/api/v1/voice/leads -H "$H"
+curl -s $BASE/api/v1/voice/leads/lead_0001 -H "$H"
+curl -s -X PUT $BASE/api/v1/voice/leads/lead_0001/profile -H "$H" \
+     -H "Content-Type: application/json" \
+     -d '{"preferred_language":"hi","notes":"asked for a callback in the evening"}'
+```
+
+### Step 4 — Record consent
+
+With `require_consent: true` (the default) a call without a voice consent
+record is blocked.
+
+```bash
+curl -s -X PUT $BASE/api/v1/voice/leads/lead_0001/consent -H "$H" \
+     -H "Content-Type: application/json" \
+     -d '{"status":"granted","channel":"voice","source":"manual-test"}'
+```
+
+```json
+{
+  "id": "cons_7c1a...",
+  "business_id": "biz_001",
+  "lead_id": "lead_0001",
+  "phone": "+919876543210",
+  "channel": "voice",
+  "status": "granted",
+  "source": "manual-test",
+  "granted_at": "2026-03-11T06:30:00Z",
+  "evidence": {},
+  "created_at": "2026-03-11T06:30:00Z"
+}
+```
+
+### Step 5 — Request a call (simulated)
+
+```bash
+curl -s -X POST $BASE/api/v1/voice/calls -H "$H" \
+     -H "Content-Type: application/json" \
+     -H "Idempotency-Key: order-4711-rahul" \
+     -d '{"lead_id":"lead_0001","language":"hi","extra_context":{"campaign":"monsoon-2026"}}'
+```
+
+```json
+{
+  "call": {
+    "id": "call_9f2c...",
+    "business_id": "biz_001",
+    "lead_id": "lead_0001",
+    "provider": "bolna",
+    "status": "simulated",
+    "to_number": "+919876543210",
+    "language": "hi",
+    "direction": "outbound",
+    "simulated": true,
+    "compliance_decision_id": "cd_41a0...",
+    "metadata": {"simulated": true, "reason": "outbound calling is disabled for this deployment"}
+  },
+  "compliance_decision_id": "cd_41a0...",
+  "compliance_decision": "allowed",
+  "compliance_checks": [
+    {"name": "consent", "outcome": "passed", "mandatory": true, "reason": "voice consent is on record"}
+  ],
+  "simulated": true,
+  "message": "the call was recorded as simulated; no provider was contacted"
+}
+```
+
+**Idempotency** — repeat the exact same request with the same key:
+
+```bash
+curl -s -X POST $BASE/api/v1/voice/calls -H "$H" \
+     -H "Content-Type: application/json" \
+     -H "Idempotency-Key: order-4711-rahul" \
+     -d '{"lead_id":"lead_0001","language":"hi","extra_context":{"campaign":"monsoon-2026"}}'
+# -> the same call id, HTTP 200. No second call is created.
+```
+
+Change the body and reuse the key:
+
+```bash
+# -> HTTP 409
+# {"error":{"code":"idempotency_conflict","message":"..."}}
+```
+
+### Step 6 — The compliance gate refuses
+
+Remove the consent (or ask for a lead that has none) and try again:
+
+```bash
+curl -s -X POST $BASE/api/v1/voice/calls -H "$H" \
+     -H "Content-Type: application/json" \
+     -H "Idempotency-Key: order-4711-no-consent" \
+     -d '{"lead_id":"lead_0002"}'
+```
+
+```json
+{
+  "error": {
+    "code": "compliance_blocked",
+    "message": "the call was blocked by the compliance gate",
+    "details": [
+      {"check": "consent", "reason_code": "consent_missing",
+       "reason": "no voice consent record exists for this lead", "mandatory": true}
+    ]
+  }
+}
+```
+
+HTTP `403`. The call row is still created with `status: "blocked"` and the
+decision is persisted, so the refusal is auditable.
+
+The nine mandatory checks are: `business_active`, `lead_exists`, `consent`,
+`dnd`, `calling_hours`, `duplicate_call`, `quota`, `concurrency` and
+`provider_ready`. **Any one of them fails → the call is blocked.** A check
+that cannot be evaluated also blocks.
+
+Other status codes: `401` (missing/invalid API key), `404` (unknown lead or
+call), `409` (`idempotency_conflict`), `422` (validation), `429`
+(`rate_limit_exceeded`), `503`/`502`/`504` (provider unreachable / error /
+timeout).
+
+### Step 7 — Simulate the provider webhook
+
+The webhook endpoints are **not** protected by `X-API-Key` — the caller is
+Bolna, not a tenant.
+
+```bash
+curl -s -X POST $BASE/api/v1/voice/webhooks/bolna/execution \
+     -H "Content-Type: application/json" \
+     -d '{"id":"exec_test_1","status":"completed",
+          "transcript":"Agent: Hello. Rahul: Hi, I am interested.",
+          "conversation_duration":45,"total_cost":1.25}'
+```
+
+```json
+{"status":"applied","call_id":"call_9f2c...","call_status":"completed","job_id":"job_55d0...","signature_valid":null}
+```
+
+Send the **same** payload again → `{"status":"duplicate"}` (the provider must
+not retry it). Send an **earlier** status → `{"status":"ignored_out_of_order"}`
+(the event is stored, the call never moves backwards). An event that matches
+no known call → `{"status":"unmatched"}`.
+
+The body is parsed and stored **before** the `200` response, so a crash after
+the acknowledgement can never lose the event.
+
+If `CALLORA_BOLNA_WEBHOOK_SECRET` is set, the raw body must carry an
+HMAC-SHA256 signature in `x-bolna-signature` (or `x-webhook-signature`,
+`x-hub-signature-256`, `x-signature`) — otherwise the event is rejected with
+`401 webhook_signature_invalid` and the rejection is audited.
+
+### Step 8 — Run the worker and read the outcome
+
+```bash
+cd backend && python -m app.modules.voice.jobs.worker
+```
+
+The worker claims a job atomically, runs the LangGraph workflow
+(`load_context → extract_qualification → classify_refusal → summarize →
+build_handoff → persist`) and writes the outcome:
+
+```bash
+curl -s $BASE/api/v1/voice/calls/call_9f2c.../outcome -H "$H"
+```
+
+```json
+{
+  "id": "out_1a2b...",
+  "business_id": "biz_001",
+  "call_id": "call_9f2c...",
+  "lead_id": "lead_0001",
+  "summary": "Rahul asked about the pricing of a 2BHK in Powai.",
+  "disposition": "interested",
+  "qualified": true,
+  "qualification_score": 0.8,
+  "qualification_answers": {"budget": "under 1 crore", "timeline": "this quarter"},
+  "refusal_category": null,
+  "refusal_reason": null,
+  "follow_up_actions": ["send the price sheet"],
+  "handoff_required": true,
+  "handoff_briefing": "Hot lead. Wants a site visit on Saturday.",
+  "language_detected": "hi",
+  "model": "openai/gpt-oss-120b",
+  "engine": "langgraph",
+  "processed_at": "2026-03-11T06:31:12Z"
+}
+```
+
+With no LLM configured (`CALLORA_VOICE_LLM_PROVIDER=null`) the same graph
+degrades to the provider payload (`engine: "provider-fallback"`) instead of
+failing.
+
+### Step 9 — Handoff
+
+```bash
+curl -s -X POST $BASE/api/v1/voice/handoffs -H "$H" \
+     -H "Content-Type: application/json" \
+     -d '{"lead_id":"lead_0001","call_id":"call_9f2c...","reason":"wants a site visit"}'
+
+curl -s $BASE/api/v1/voice/handoffs -H "$H"
+
+curl -s -X PATCH $BASE/api/v1/voice/handoffs/handoff_7d3e... -H "$H" \
+     -H "Content-Type: application/json" \
+     -d '{"status":"completed","outcome":"site visit scheduled"}'
+```
+
+A warm transfer that arrives during the call is ingested by
+`POST /api/v1/voice/webhooks/bolna/pre-transfer` and creates the handoff
+automatically.
+
+### Step 10 — Operator views
+
+```bash
+curl -s $BASE/api/v1/voice/ops/stats -H "$H"
+```
+
+```json
+{
+  "business_id": "biz_001",
+  "calls_total": 128,
+  "calls_by_status": {"completed": 61, "no_answer": 40, "blocked": 19, "simulated": 8},
+  "calls_today": 12,
+  "blocked_today": 3,
+  "handoffs_open": 4,
+  "consent_granted": 96,
+  "consent_missing": 5,
+  "dnd_entries": 2,
+  "jobs_pending": 1,
+  "jobs_failed": 0,
+  "total_cost": 47.32,
+  "currency": "INR"
+}
+```
+
+```bash
+curl -s "$BASE/api/v1/voice/ops/compliance-decisions?limit=20" -H "$H"
+curl -s "$BASE/api/v1/voice/ops/audit?limit=20" -H "$H"
+curl -s "$BASE/api/v1/voice/ops/jobs?status=dead" -H "$H"
+curl -s -X POST $BASE/api/v1/voice/ops/jobs/job_55d0.../retry -H "$H"
+```
+
+### Database (migration `0006_voice_agent`)
+
+New tables: `voice_business_profiles`, `voice_lead_profiles`,
+`voice_consent_records`, `voice_dnd_entries`, `voice_calls`, `voice_call_events`,
+`voice_call_outcomes`, `voice_handoffs`, `voice_compliance_decisions`,
+`voice_audit_logs`, `voice_jobs`. `idempotency_keys` gained a nullable
+`payload_hash` column. No existing table was rewritten.
+
+The job queue lives in PostgreSQL (`voice_jobs`) with a `dedupe_key`, an
+atomic claim (conditional `UPDATE` + `skip_locked`), exponential backoff and
+a `dead` status after `CALLORA_VOICE_JOB_MAX_ATTEMPTS` attempts. Redis is
+never authoritative for any of it.
+
+### Tests added
+
+- `tests/test_voice_compliance.py` (34) — every mandatory check in isolation, fail-closed behaviour, DND, consent, calling window, quotas, concurrency, duplicate-call rules.
+- `tests/test_voice_orchestrator.py` (23) — simulated / blocked / provider paths, retry semantics, the audit trail, `refresh_status`.
+- `tests/test_voice_webhooks.py` (23) — applying events, dedupe, out-of-order delivery, the post-call job, signature verification, the pre-transfer event.
+- `tests/test_voice_jobs.py` (23) — enqueue, dedupe key, atomic claim, retries, backoff, dead jobs, stale release, the worker.
+- `tests/test_voice_postcall.py` (15) — the LangGraph workflow, qualification, refusals, handoff creation, the degradation path.
+- `tests/test_voice_api.py` (70) — authentication, call initiation, idempotency, the 409 conflict, the rate limit, the webhook endpoints, the handoffs, the ops endpoints, the business configuration, consent and DND.
+
+The suite is offline by construction: the provider is a `FakeProvider`, the
+model is a `ScriptedLLM`, and outbound calling is switched off in the fixture.
+No test contacts Bolna, Redis or an LLM.
+
+### Remaining limitations
+- No real call is placed unless `CALLORA_VOICE_ENABLE_OUTBOUND_CALLS=true` **and** a Bolna key is configured. Until then every accepted call is `simulated`.
+- Bolna documents no HMAC scheme for execution webhooks — `CALLORA_BOLNA_WEBHOOK_SECRET` is opt-in, and without it the endpoint should be restricted at the network layer.
+- The post-call analysis is best-effort: any model error, timeout or malformed response falls back to the provider payload. It is never blended.
+- The LangGraph workflow is deliberately linear — no looping, no self-critique, one pass per call.
+- Warm transfer is modelled (the pre-transfer event creates a handoff) but the actual live transfer is executed by Bolna, not by Callora.
+- Language support follows the configured `supported_languages` list; the model is asked to answer in the lead's language but the transcripts are whatever Bolna returns.
+
+
 ### Full API route listing (current)
 ```
 GET  /api/v1/agent/leads
@@ -1080,10 +1517,46 @@ GET  /api/v1/leads
 POST /api/v1/leads
 POST /api/v1/leads/import
 GET  /api/v1/leads/{lead_id}
+GET  /api/v1/voice/business
+PATCH /api/v1/voice/business
+GET  /api/v1/voice/calls
+POST /api/v1/voice/calls
+GET  /api/v1/voice/calls/{call_id}
+POST /api/v1/voice/calls/{call_id}/cancel
+GET  /api/v1/voice/calls/{call_id}/events
+GET  /api/v1/voice/calls/{call_id}/outcome
+POST /api/v1/voice/calls/{call_id}/postcall
+POST /api/v1/voice/calls/{call_id}/refresh
+GET  /api/v1/voice/dnd
+POST /api/v1/voice/dnd
+DELETE /api/v1/voice/dnd/{entry_id}
+GET  /api/v1/voice/handoffs
+POST /api/v1/voice/handoffs
+GET  /api/v1/voice/handoffs/{handoff_id}
+PATCH /api/v1/voice/handoffs/{handoff_id}
+GET  /api/v1/voice/leads
+GET  /api/v1/voice/leads/{lead_id}
+GET  /api/v1/voice/leads/{lead_id}/consent
+PUT  /api/v1/voice/leads/{lead_id}/consent
+PUT  /api/v1/voice/leads/{lead_id}/profile
+GET  /api/v1/voice/ops/audit
+GET  /api/v1/voice/ops/compliance-decisions
+GET  /api/v1/voice/ops/jobs
+GET  /api/v1/voice/ops/jobs/{job_id}
+POST /api/v1/voice/ops/jobs/{job_id}/retry
+GET  /api/v1/voice/ops/stats
+POST /api/v1/voice/webhooks/bolna/execution
+POST /api/v1/voice/webhooks/bolna/pre-transfer
 ```
 
 ### Summary
 - Recovery dashboard routes added: summary, cases (filtered/paginated/searchable), case get, score-breakdown, outreach-content (get/generate), outcomes. All business-scoped, use existing Groq config, no live calls required in tests, no fabrication, no telephony.
 - Database: `recovery_outreach_content`, `recovery_outreach_events` (migration `0005_recovery_outreach`).
 - Outreach generation hardened: verified-vs-missing field separation, CRM/contact evidence gating, grounding-violation rejection, full schema validation, quick-copy alignment, configurable agent identity, alias-aware language resolution with configurable fallback, natural gender-neutral Devanagari Hindi templates, preferred-vs-alternative channel plan.
-- 490 tests passed (including `tests/test_outreach_generation.py`); ruff clean.
+- OpenAPI hygiene: the recovery-dashboard routes that shadow the recovery-agent routes now carry unique operation ids (`dashboard_list_recovery_cases`, `dashboard_get_recovery_case`) — the document no longer contains duplicate operation ids, so client generators can consume it.
+- Module 6 (Outbound Voice Agent) routes added: 24 paths / 30 operations under `/api/v1/voice` — business config, voice lead profiles, consent, DND registry, call initiation + list/get/events/outcome/refresh/cancel/postcall, handoffs, ops (stats/jobs/audit/compliance-decisions) and the two Bolna webhooks. Every call goes through a **fail-closed, nine-check compliance gate**; every decision is persisted and auditable; call initiation is idempotent; webhooks are deduplicated and never move a call backwards.
+- Database: 11 new `voice_*` tables + `idempotency_keys.payload_hash` (migration `0006_voice_agent`).
+- Post-call intelligence: LangGraph workflow (`load_context → extract_qualification → classify_refusal → summarize → build_handoff → persist`) producing a summary, qualification result, refusal category, follow-up actions and a human handoff briefing; degrades to the provider payload when no LLM is configured.
+- Background work runs on a **durable PostgreSQL job queue** (atomic claim, `skip_locked`, exponential backoff, dead-letter + manual retry), drained by `python -m app.modules.voice.jobs.worker`.
+- **No real call is placed by default** — `CALLORA_VOICE_ENABLE_OUTBOUND_CALLS=false` makes every accepted call `simulated`. Enabling it is a documented, deliberate step (see [`docs/voice-agent.md`](docs/voice-agent.md#7-enabling-real-calling)).
+- Full suite green — **678 tests passed** (including the 188 new voice tests); ruff clean.

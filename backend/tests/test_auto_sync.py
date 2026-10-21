@@ -122,10 +122,27 @@ def _business_operations() -> set:
 
 class TestRouteRegistration:
     def test_exactly_15_business_routes(self):
-        """Exactly 15 business operations are registered under /api/v1."""
+        """The registered operation set is exactly the documented one.
+
+        The count is asserted per module so a new module has to be
+        reflected here explicitly instead of silently changing the
+        total.
+        """
         ops = _business_operations()
-        # Recovery dashboard adds routes required by the dashboard task.
-        assert len(ops) == 20, f"Expected 20 operations, got {len(ops)}: {sorted(ops)}"
+        # Module 1-5: leads, imports, CRM, agent leads, recovery agent
+        # and recovery dashboard.
+        legacy_ops = {op for op in ops if not op[1].startswith("/api/v1/voice/")}
+        # Module 6: the outbound voice agent.
+        voice_ops = {op for op in ops if op[1].startswith("/api/v1/voice/")}
+        assert len(legacy_ops) == 20, (
+            f"Expected 20 non-voice operations, got {len(legacy_ops)}: "
+            f"{sorted(legacy_ops)}"
+        )
+        assert len(voice_ops) == 30, (
+            f"Expected 30 voice operations, got {len(voice_ops)}: "
+            f"{sorted(voice_ops)}"
+        )
+        assert len(ops) == 50, f"Expected 50 operations, got {len(ops)}: {sorted(ops)}"
 
     def test_no_unversioned_leads_routes(self):
         """No unversioned /leads or /imports routes exist."""
