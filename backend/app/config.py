@@ -6,14 +6,43 @@ production without code changes.
 """
 
 from functools import lru_cache
+import os
+from pathlib import Path
 from typing import Dict, List, Optional
 
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+#: ``backend/`` — the directory that holds the application package.
+_BACKEND_DIR = Path(__file__).resolve().parent.parent
+#: The repository root — the directory that holds ``docker-compose.yml`` and
+#: the shared ``.env`` file.
+_REPO_ROOT = _BACKEND_DIR.parent
+
+
+def _dotenv_files() -> tuple[str, ...]:
+    """The dotenv files to load, most general first.
+
+    The paths are resolved from the package location, not from the current
+    working directory, so the same file is read whether the app is started
+    from the repository root, from ``backend/``, or inside the container.
+
+    The test suite sets ``CALLORA_IGNORE_DOTENV=1`` so a developer's local
+    secrets can never influence a test run.
+    """
+    if os.getenv("CALLORA_IGNORE_DOTENV", "").strip().lower() in ("1", "true", "yes"):
+        return ()
+    # Later entries win, so ``backend/.env`` overrides the shared
+    # ``<repo>/.env``.
+    return (str(_REPO_ROOT / ".env"), str(_BACKEND_DIR / ".env"))
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="CALLORA_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="CALLORA_",
+        env_file=_dotenv_files(),
+        extra="ignore",
+    )
 
     # --- Database -------------------------------------------------------
     database_url: str = "postgresql+psycopg2://callora:callora@localhost:5432/callora"

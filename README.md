@@ -92,6 +92,27 @@ required to boot the service.
 The complete reference — every voice, Bolna, Redis and LLM variable — lives
 in [`docs/voice-agent.md`](docs/voice-agent.md#3-configuration-reference).
 
+### Where to put your secrets
+
+Copy `.env.example` to **`.env` in the repository root** (next to
+`docker-compose.yml`) and fill in the values:
+
+```bash
+cp .env.example .env     # Windows: copy .env.example .env
+```
+
+```ini
+CALLORA_BOLNA_API_KEY=<your key>
+CALLORA_BOLNA_DEFAULT_AGENT_ID=<agent id>
+CALLORA_BOLNA_DEFAULT_FROM_NUMBER=+91XXXXXXXXXX
+```
+
+That one file is read by **Docker Compose and by the backend itself**,
+wherever you start it from — the path is resolved from the package
+location, not the working directory. Shell variables override the file,
+and the test suite ignores it entirely so your secrets can never leak
+into a test run. `.env` is gitignored; `.env.example` is not.
+
 ### Provider credentials
 
 **Plivo is not implemented** — Bolna is the only voice provider, and the

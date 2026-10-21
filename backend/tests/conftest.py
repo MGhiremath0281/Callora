@@ -16,6 +16,8 @@ from sqlalchemy.orm import Session
 
 # Ensure deterministic test settings before the app module is imported.
 os.environ.setdefault("CALLORA_DEBUG", "true")
+# Never let a developer's local .env influence a test run.
+os.environ.setdefault("CALLORA_IGNORE_DOTENV", "1")
 
 from app.config import get_settings  # noqa: E402
 from app.db.base import Base  # noqa: E402

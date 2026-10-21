@@ -146,6 +146,14 @@ alembic upgrade head
 uvicorn app.main:app --reload --port 8000
 ```
 
+Secrets (the Bolna API key, the Groq key) go in **`<repo>/.env`** — the
+file next to `docker-compose.yml`. The backend resolves it from the
+package location, not from the current working directory, so it works
+whether you start the app from the repository root or from `backend/`.
+Shell variables always win over the file, and the test suite ignores the
+file entirely (`CALLORA_IGNORE_DOTENV=1`) so your local secrets can never
+leak into a test run.
+
 In a second terminal, run the background worker:
 
 ```bash
@@ -547,12 +555,34 @@ prompt, the welcome message, the language). Note the **agent id** and the
 
 ### Step 2 — credentials and the compliance policy
 
+Put the credentials in the **`.env` file in the repository root**
+(`<repo>/.env`, next to `docker-compose.yml`). That single file is read by
+Docker Compose *and* by the backend itself, no matter which directory you
+start it from:
+
+```bash
+# <repo>/.env  — gitignored, never committed
+CALLORA_BOLNA_API_KEY=<your key>
+CALLORA_BOLNA_DEFAULT_AGENT_ID=<agent id>
+CALLORA_BOLNA_DEFAULT_FROM_NUMBER=+91XXXXXXXXXX
+CALLORA_BOLNA_WEBHOOK_SECRET=<shared secret>   # optional but recommended
+```
+
+If you prefer not to use a file, export the variables in the shell that
+starts the backend and the worker — shell variables win over the file:
+
 ```bash
 export CALLORA_BOLNA_API_KEY="<your key>"
 export CALLORA_BOLNA_DEFAULT_AGENT_ID="<agent id>"
 export CALLORA_BOLNA_DEFAULT_FROM_NUMBER="+91XXXXXXXXXX"
 export CALLORA_BOLNA_WEBHOOK_SECRET="<shared secret>"   # optional but recommended
 ```
+
+> **Only the key is needed to exercise the flow.** With
+> `CALLORA_VOICE_ENABLE_OUTBOUND_CALLS=false` (the default) the key is
+> never sent anywhere — the provider is not contacted at all, so the
+> `provider_ready` check is skipped. The key only matters the moment the
+> switch is turned on.
 
 Then configure the policy per business and **verify it**:
 
