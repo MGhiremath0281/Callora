@@ -423,6 +423,29 @@ def count_in_flight_calls(session: Session, business_id: str) -> int:
     return count_calls(session, business_id, statuses=list(IN_FLIGHT_STATUSES))
 
 
+def find_calls_needing_sync(
+    session: Session,
+    statuses: List[str],
+    before: datetime,
+    limit: int = 100,
+    business_id: Optional[str] = None,
+) -> List[Call]:
+    """Calls in a reconcilable status that may be out of date.
+
+    ``before`` is a coarse lower bound on the age of the call (the caller
+    filters the exact due time in Python, because the due time depends on
+    the status of the call and on its ``scheduled_at``).
+    """
+    stmt = select(Call).where(
+        Call.status.in_(statuses),
+        Call.created_at <= before,
+    )
+    if business_id:
+        stmt = stmt.where(Call.business_id == business_id)
+    stmt = stmt.order_by(Call.created_at.asc()).limit(limit)
+    return list(session.execute(stmt).scalars().all())
+
+
 def count_attempts_today(
     session: Session, business_id: str, tz_name: str, lead_id: Optional[str] = None
 ) -> int:
