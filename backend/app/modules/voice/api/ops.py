@@ -6,6 +6,7 @@
     POST /api/v1/voice/ops/jobs/{job_id}/retry  re-queue a failed job
     GET  /api/v1/voice/ops/audit                read the audit trail
     GET  /api/v1/voice/ops/compliance-decisions read the compliance decisions
+    POST /api/v1/voice/ops/sync-calls           reconcile the calls with the provider
 
 These endpoints exist so an operator can answer "what happened, what was
 allowed, and what is stuck" without a database client.
@@ -16,8 +17,10 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
+from app.config import Settings, get_settings
 from app.db.session import get_db
 from app.modules.voice import repository as repo
+from app.modules.voice import sync
 from app.modules.voice.api.deps import current_business
 from app.modules.voice.api.serializers import (
     audit_log_payload,
@@ -36,6 +39,7 @@ from app.modules.voice.schemas import (
     AuditLogResponse,
     ComplianceDecisionResponse,
     JobResponse,
+    StatusSyncResponse,
     VoiceStatsResponse,
 )
 
@@ -197,9 +201,60 @@ async def list_compliance_decisions(
     return list_payload(items, business_id, limit, offset)
 
 
+@router.post(
+    "/sync-calls",
+    response_model=StatusSyncResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def sync_call_statuses(
+    business_id: str = Depends(current_business),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    """Reconcile the calls of the business with the voice provider.
+
+    The provider webhook is the fast path; this endpoint is the manual
+    version of the background sweep and is the way an operator unblocks a
+    call whose webhook never arrived. The provider is asked before
+    anything is changed, and a call is only closed when the provider
+    confirms it (or when the documented timeout policy applies to a call
+    that never got past the dial queue).
+    """
+    report = sync.sweep(db, settings, business_id=business_id)
+    db.commit()
+    repo.add_audit_log(
+        db,
+        action=AuditAction.CALL_STATUS_SYNCED,
+        business_id=business_id,
+        actor="api",
+        entity_type="business",
+        entity_id=business_id,
+        reason_code="manual_status_sync",
+        reason="an operator asked for the call statuses to be reconciled",
+        metadata={
+            "checked": report.checked,
+            "applied": report.applied,
+            "unchanged": report.unchanged,
+            "skipped": report.skipped,
+            "failed": report.failed,
+        },
+    )
+    db.commit()
+    return {
+        "business_id": business_id,
+        "checked": report.checked,
+        "applied": report.applied,
+        "unchanged": report.unchanged,
+        "skipped": report.skipped,
+        "failed": report.failed,
+        "outcomes": [outcome.to_dict() for outcome in report.outcomes],
+    }
+
+
 __all__ = [
     "router",
     "AuditLogResponse",
     "ComplianceDecisionResponse",
     "JobResponse",
+    "StatusSyncResponse",
 ]

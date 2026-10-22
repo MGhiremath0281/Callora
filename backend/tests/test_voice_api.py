@@ -191,6 +191,117 @@ class TestCallInitiation:
 
 
 # ---------------------------------------------------------------------------
+# The development-only quota override
+# ---------------------------------------------------------------------------
+
+
+class TestDevelopmentQuotaOverride:
+    """The daily quotas can be skipped in a development environment.
+
+    The override needs two explicit opt-ins — ``CALLORA_DISABLE_CALL_QUOTAS``
+    *and* a development ``CALLORA_ENVIRONMENT`` — and it relaxes nothing but
+    the two daily quotas.
+    """
+
+    @staticmethod
+    def _completed_call(db, lead_id=VOICE_LEAD_ID):
+        db.add(
+            Call(
+                business_id=VOICE_BIZ,
+                lead_id=lead_id,
+                provider="bolna",
+                status=CallStatus.COMPLETED,
+                to_number=VOICE_PHONE,
+            )
+        )
+        db.commit()
+
+    def test_the_daily_quota_blocks_the_call(
+        self, voice_client, voice_business, voice_lead, voice_consent, db
+    ):
+        voice_business.max_calls_per_lead_per_day = 1
+        db.commit()
+        self._completed_call(db)
+        response = voice_client.post(CALLS, json=_payload(), headers=auth_headers())
+        assert response.status_code == 403
+        reasons = [r["reason_code"] for r in response.json()["error"]["details"]]
+        assert "daily_lead_quota_exceeded" in reasons
+
+    def test_the_daily_quota_is_skipped_in_a_development_environment(
+        self, voice_settings, voice_client, voice_business, voice_lead, voice_consent, db
+    ):
+        voice_settings.environment = "local"
+        voice_settings.disable_call_quotas = True
+        voice_business.max_calls_per_lead_per_day = 1
+        db.commit()
+        self._completed_call(db)
+        response = voice_client.post(CALLS, json=_payload(), headers=auth_headers())
+        assert response.status_code == 201, response.text
+        body = response.json()
+        assert body["compliance_decision"] == "allowed"
+        assert body["simulated"] is True
+        quota = next(c for c in body["compliance_checks"] if c["name"] == "quota")
+        assert quota["outcome"] == "skipped"
+        assert quota["details"]["disabled"] is True
+
+    def test_the_override_is_refused_in_production(
+        self, voice_settings, voice_client, voice_business, voice_lead, voice_consent, db
+    ):
+        voice_settings.environment = "production"
+        voice_settings.disable_call_quotas = True
+        voice_business.max_calls_per_lead_per_day = 1
+        db.commit()
+        self._completed_call(db)
+        response = voice_client.post(CALLS, json=_payload(), headers=auth_headers())
+        assert response.status_code == 403
+        reasons = [r["reason_code"] for r in response.json()["error"]["details"]]
+        assert "daily_lead_quota_exceeded" in reasons
+
+    def test_consent_still_blocks_the_call(
+        self, voice_settings, voice_client, voice_business, voice_lead, db
+    ):
+        """Skipping the quotas never relaxes the consent rule."""
+        voice_settings.environment = "local"
+        voice_settings.disable_call_quotas = True
+        voice_business.max_calls_per_lead_per_day = 1
+        db.commit()
+        self._completed_call(db)
+        response = voice_client.post(CALLS, json=_payload(), headers=auth_headers())
+        assert response.status_code == 403
+        reasons = [r["reason_code"] for r in response.json()["error"]["details"]]
+        assert "consent_missing" in reasons
+
+    def test_a_dnd_number_is_still_never_called(
+        self, voice_settings, voice_client, voice_business, voice_lead, voice_consent, db
+    ):
+        """Skipping the quotas never relaxes the do-not-disturb rule."""
+        voice_settings.environment = "local"
+        voice_settings.disable_call_quotas = True
+        repo.add_dnd_entry(
+            db,
+            business_id=VOICE_BIZ,
+            phone=VOICE_PHONE,
+            reason="the lead asked not to be called",
+            source="test",
+        )
+        db.commit()
+        response = voice_client.post(CALLS, json=_payload(), headers=auth_headers())
+        assert response.status_code == 403
+        reasons = [r["reason_code"] for r in response.json()["error"]["details"]]
+        assert "dnd_active" in reasons
+
+    def test_the_configuration_reports_the_override(
+        self, voice_settings, voice_client, voice_business
+    ):
+        response = voice_client.get("/api/v1/voice/business", headers=auth_headers())
+        assert response.json()["call_quotas_disabled"] is False
+        voice_settings.environment = "local"
+        voice_settings.disable_call_quotas = True
+        response = voice_client.get("/api/v1/voice/business", headers=auth_headers())
+        assert response.json()["call_quotas_disabled"] is True
+
+
+# ---------------------------------------------------------------------------
 # Idempotency
 # ---------------------------------------------------------------------------
 
