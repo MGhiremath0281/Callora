@@ -236,6 +236,92 @@ class TestPostCallJob:
 
 
 # ---------------------------------------------------------------------------
+# Unknown provider statuses
+# ---------------------------------------------------------------------------
+
+
+class TestUnknownStatus:
+    """A status Callora has never seen says nothing about the call.
+
+    It used to be mapped onto ``error``, which terminated a call that
+    was possibly still running, released the duplicate-call guard and
+    queued a post-call analysis for a conversation that had not
+    happened.
+    """
+
+    def test_an_unknown_status_does_not_terminate_the_call(
+        self, service, db, call
+    ):
+        result = service.process_execution_event(_payload("wobbled"))
+
+        assert result.status == RESULT_IGNORED
+        assert call.status == CallStatus.QUEUED
+        assert call.ended_at is None
+
+    def test_an_unknown_status_queues_no_post_call_work(self, service, db, call):
+        service.process_execution_event(_payload("wobbled"))
+
+        assert queue.list_jobs(db, business_id=VOICE_BIZ) == []
+
+    def test_an_unknown_status_keeps_the_duplicate_call_guard(
+        self, service, db, call
+    ):
+        service.process_execution_event(_payload("wobbled"))
+
+        assert repo.count_in_flight_calls(db, VOICE_BIZ) == 1
+
+    def test_an_unknown_status_is_recorded_as_not_processed(
+        self, service, db, call
+    ):
+        service.process_execution_event(_payload("wobbled"))
+
+        events = repo.list_call_events(db, VOICE_BIZ, call.id)
+        assert len(events) == 1
+        assert events[0].processed is False
+        assert events[0].processing_error == "unknown_provider_status"
+
+
+# ---------------------------------------------------------------------------
+# Retries and the duplicate-call guard
+# ---------------------------------------------------------------------------
+
+
+class TestRetries:
+    def test_a_retried_delivery_after_the_call_ended_changes_nothing(
+        self, service, db, call
+    ):
+        first = service.process_execution_event(_payload("completed"))
+        second = service.process_execution_event(_payload("completed"))
+
+        assert first.status == RESULT_PROCESSED
+        assert second.status == RESULT_DUPLICATE
+        assert call.status == CallStatus.COMPLETED
+        assert len(queue.list_jobs(db, business_id=VOICE_BIZ)) == 1
+
+    def test_a_terminal_status_releases_the_duplicate_call_guard(
+        self, service, db, call
+    ):
+        assert repo.count_in_flight_calls(db, VOICE_BIZ) == 1
+
+        service.process_execution_event(_payload("completed"))
+
+        assert repo.count_in_flight_calls(db, VOICE_BIZ) == 0
+
+    def test_an_active_call_keeps_the_duplicate_call_guard(self, service, db, call):
+        service.process_execution_event(_payload("ringing"))
+
+        assert repo.count_in_flight_calls(db, VOICE_BIZ) == 1
+
+    def test_a_dropped_line_releases_the_duplicate_call_guard(
+        self, service, db, call
+    ):
+        service.process_execution_event(_payload("call-disconnected"))
+
+        assert call.status == CallStatus.DISCONNECTED
+        assert repo.count_in_flight_calls(db, VOICE_BIZ) == 0
+
+
+# ---------------------------------------------------------------------------
 # Signature verification
 # ---------------------------------------------------------------------------
 
