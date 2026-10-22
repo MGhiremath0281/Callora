@@ -62,6 +62,19 @@
       # compliance policy and the provider account are ready.
       CALLORA_VOICE_ENABLE_OUTBOUND_CALLS: ${CALLORA_VOICE_ENABLE_OUTBOUND_CALLS:-false}
       CALLORA_VOICE_LLM_PROVIDER: ${CALLORA_VOICE_LLM_PROVIDER:-groq}
+      # Deployment environment marker. "production" (the default) keeps every
+      # compliance rule enforced; set "local" in your .env to unlock the
+      # development-only override below.
+      CALLORA_ENVIRONMENT: ${CALLORA_ENVIRONMENT:-production}
+      # Development-only: skips the daily per-lead and per-business call
+      # quotas. Ignored (and logged) unless CALLORA_ENVIRONMENT names a
+      # development environment.
+      CALLORA_DISABLE_CALL_QUOTAS: ${CALLORA_DISABLE_CALL_QUOTAS:-false}
+      # Minimum gap between two calls to the same lead, in seconds. The
+      # default (3600 = 60 minutes) is the production value; a local .env
+      # may lower it for fast test calls. It never weakens the in-flight
+      # guard (a call Bolna still reports as queued/ringing/active).
+      CALLORA_VOICE_DUPLICATE_CALL_COOLDOWN_SECONDS: ${CALLORA_VOICE_DUPLICATE_CALL_COOLDOWN_SECONDS:-3600}
     volumes:
       - ./backend/app:/app/app
       - ./backend/alembic:/app/alembic
@@ -91,6 +104,12 @@
       CALLORA_BOLNA_DEFAULT_FROM_NUMBER: ${CALLORA_BOLNA_DEFAULT_FROM_NUMBER:-}
       CALLORA_VOICE_ENABLE_OUTBOUND_CALLS: ${CALLORA_VOICE_ENABLE_OUTBOUND_CALLS:-false}
       CALLORA_VOICE_LLM_PROVIDER: ${CALLORA_VOICE_LLM_PROVIDER:-groq}
+      # Same environment marker and development-only override as the backend
+      # service: the worker reads the same configuration.
+      CALLORA_ENVIRONMENT: ${CALLORA_ENVIRONMENT:-production}
+      CALLORA_DISABLE_CALL_QUOTAS: ${CALLORA_DISABLE_CALL_QUOTAS:-false}
+      # The worker reads the same configuration as the backend.
+      CALLORA_VOICE_DUPLICATE_CALL_COOLDOWN_SECONDS: ${CALLORA_VOICE_DUPLICATE_CALL_COOLDOWN_SECONDS:-3600}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
     volumes:
       - ./backend/app:/app/app

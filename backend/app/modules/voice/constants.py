@@ -32,6 +32,11 @@ class CallStatus:
     STOPPED = "stopped"
     ERROR = "error"
     BALANCE_LOW = "balance_low"
+    # The provider reported a status Callora does not know. It is never
+    # written to a call: an unknown status says nothing about whether the
+    # call is over, so the call keeps its status and the reconciliation
+    # sweep resolves it by polling the provider.
+    UNKNOWN = "unknown"
 
 
 #: Statuses that mean "the call is over"; a post-call job is queued for each.
@@ -70,6 +75,13 @@ ATTEMPTED_STATUSES = frozenset(
 )
 
 #: Statuses that mean a call is currently in flight.
+#:
+#: This is the set the duplicate-call guard and the concurrency cap work
+#: on, so it only contains states in which a call really is pending or
+#: running. A terminal status is not in it — a finished call releases the
+#: guard — and neither is ``disconnected``: the line is down, Bolna is
+#: only finalising the payload, and the call no longer occupies the
+#: business' concurrency budget. The cooldown rule still applies to it.
 IN_FLIGHT_STATUSES = frozenset(
     {
         CallStatus.PENDING,
@@ -78,8 +90,35 @@ IN_FLIGHT_STATUSES = frozenset(
         CallStatus.INITIATED,
         CallStatus.RINGING,
         CallStatus.IN_PROGRESS,
-        CallStatus.DISCONNECTED,
     }
+)
+
+#: Statuses in which the provider has accepted the call but has not dialled
+#: out yet. No conversation is taking place, so a call that stays in one of
+#: these states past the documented timeout can be failed without ever
+#: cutting a live conversation short.
+PRE_DIAL_STATUSES = frozenset(
+    {
+        CallStatus.PENDING,
+        CallStatus.SCHEDULED,
+        CallStatus.QUEUED,
+    }
+)
+
+#: Statuses in which a conversation is genuinely taking place. A call in
+#: one of these states is never failed because time passed: only the
+#: provider can end it.
+ACTIVE_STATUSES = frozenset(
+    {
+        CallStatus.INITIATED,
+        CallStatus.RINGING,
+        CallStatus.IN_PROGRESS,
+    }
+)
+
+#: Statuses the reconciliation sweep is allowed to poll the provider for.
+RECONCILABLE_STATUSES = frozenset(
+    PRE_DIAL_STATUSES | ACTIVE_STATUSES | {CallStatus.DISCONNECTED}
 )
 
 #: Monotonic ordering of the call lifecycle. Used to reject out-of-order
@@ -105,15 +144,28 @@ STATUS_RANK: Dict[str, int] = {
 }
 
 #: Bolna execution statuses -> internal call status.
+#:
+#: The list mirrors Bolna's own status enum (see the Bolna "Errors &
+#: status codes" reference): ``scheduled``/``prepared`` -> ``queued`` ->
+#: ``initiated`` -> ``ringing`` -> ``in-progress`` ->
+#: ``call-disconnected`` -> ``completed``, plus the hard failures.
 BOLNA_STATUS_MAP: Dict[str, str] = {
     "scheduled": CallStatus.SCHEDULED,
+    # "Execution record created and validated but not yet handed off to
+    # the dial queue" — accepted, not dialled.
+    "prepared": CallStatus.QUEUED,
     "queued": CallStatus.QUEUED,
     "rescheduled": CallStatus.SCHEDULED,
     "initiated": CallStatus.INITIATED,
     "ringing": CallStatus.RINGING,
     "in-progress": CallStatus.IN_PROGRESS,
     "in_progress": CallStatus.IN_PROGRESS,
+    # Some providers (and Bolna's older payloads) name the connected
+    # state explicitly.
+    "connected": CallStatus.IN_PROGRESS,
+    "active": CallStatus.IN_PROGRESS,
     "call-disconnected": CallStatus.DISCONNECTED,
+    "disconnected": CallStatus.DISCONNECTED,
     "completed": CallStatus.COMPLETED,
     "no-answer": CallStatus.NO_ANSWER,
     "no_answer": CallStatus.NO_ANSWER,
@@ -125,24 +177,35 @@ BOLNA_STATUS_MAP: Dict[str, str] = {
     "error": CallStatus.ERROR,
     "balance-low": CallStatus.BALANCE_LOW,
     "balance_low": CallStatus.BALANCE_LOW,
+    # The internal vocabulary maps onto itself, so mapping an already
+    # mapped status is idempotent. That matters because the provider
+    # adapters hand out the internal status and the raw provider status
+    # at the same time.
+    "pending": CallStatus.PENDING,
+    "blocked": CallStatus.BLOCKED,
+    "simulated": CallStatus.SIMULATED,
+    "unknown": CallStatus.UNKNOWN,
 }
 
 
 def map_provider_status(provider_status: str) -> str:
     """Map a provider status onto the internal vocabulary.
 
-    Unknown provider statuses become ``in_progress`` only when they look
-    like an active call; otherwise they are treated as ``error`` so that an
-    unknown terminal state can never silently look successful.
+    An unknown status maps to :data:`CallStatus.UNKNOWN` and nothing else.
+    It used to map to ``error``, which was wrong in both directions: a
+    status Callora had never seen terminated a call that was possibly
+    still running, released the duplicate-call guard and queued the
+    post-call analysis for a conversation that had not happened. An
+    unknown status says nothing about whether the call is over, so the
+    state machine leaves the call where it is and the reconciliation
+    sweep resolves it by polling the provider.
     """
     if not provider_status:
-        return CallStatus.PENDING
+        return CallStatus.UNKNOWN
     key = provider_status.strip().lower()
     if key in BOLNA_STATUS_MAP:
         return BOLNA_STATUS_MAP[key]
-    if key in {"in-progress", "in_progress", "active", "ringing"}:
-        return CallStatus.IN_PROGRESS
-    return CallStatus.ERROR
+    return CallStatus.UNKNOWN
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +345,8 @@ class HandoffStatus:
 
 class JobType:
     POSTCALL_PROCESS = "postcall.process"
+    #: Reconcile the status of calls the provider has not reported on.
+    STATUS_SYNC = "status.sync"
 
 
 class JobStatus:
@@ -301,6 +366,8 @@ class AuditAction:
     WEBHOOK_RECEIVED = "webhook.received"
     WEBHOOK_REJECTED = "webhook.rejected"
     WEBHOOK_DUPLICATE = "webhook.duplicate"
+    CALL_STATUS_SYNCED = "call.status_synced"
+    CALL_TIMEOUT = "call.timeout"
     POSTCALL_COMPLETED = "postcall.completed"
     POSTCALL_FAILED = "postcall.failed"
     HANDOFF_REQUESTED = "handoff.requested"

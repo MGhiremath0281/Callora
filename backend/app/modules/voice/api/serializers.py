@@ -25,9 +25,11 @@ def business_payload(business: Business, settings: Any = None) -> Dict[str, Any]
     """Serialize a business voice configuration."""
     provider_configured = False
     outbound_enabled = False
+    quotas_disabled = False
     if settings is not None:
         provider_configured = bool(getattr(settings, "bolna_api_key", None))
         outbound_enabled = bool(getattr(settings, "voice_enable_outbound_calls", False))
+        quotas_disabled = bool(getattr(settings, "call_quotas_disabled", False))
     return {
         "business_id": business.id,
         "name": business.name,
@@ -43,7 +45,6 @@ def business_payload(business: Business, settings: Any = None) -> Dict[str, Any]
         "require_consent": business.require_consent,
         "dnd_enabled": business.dnd_enabled,
         "bolna_agent_id": business.bolna_agent_id,
-        "bolna_from_number": business.bolna_from_number,
         "agent_instructions": business.agent_instructions,
         "qualification_questions": list(business.qualification_questions or []),
         "warm_transfer_enabled": business.warm_transfer_enabled,
@@ -52,6 +53,7 @@ def business_payload(business: Business, settings: Any = None) -> Dict[str, Any]
         "is_active": business.is_active,
         "outbound_calls_enabled": outbound_enabled,
         "provider_configured": provider_configured,
+        "call_quotas_disabled": quotas_disabled,
         "created_at": business.created_at,
         "updated_at": business.updated_at,
     }

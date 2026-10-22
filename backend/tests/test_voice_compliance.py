@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from app.config import Settings
 from app.models import Lead
 from app.modules.voice import repository as repo
 from app.modules.voice.compliance import (
@@ -459,7 +460,7 @@ class TestDuplicateCallRule:
     def test_cooldown_blocks_a_rapid_second_call(
         self, voice_settings, db, voice_business, voice_lead, voice_consent, provider
     ):
-        voice_settings.voice_duplicate_call_cooldown_minutes = 60
+        voice_settings.voice_duplicate_call_cooldown_seconds = 3600
         _call(
             db,
             VOICE_BIZ,
@@ -474,7 +475,7 @@ class TestDuplicateCallRule:
     def test_cooldown_expires(
         self, voice_settings, db, voice_business, voice_lead, voice_consent, provider
     ):
-        voice_settings.voice_duplicate_call_cooldown_minutes = 60
+        voice_settings.voice_duplicate_call_cooldown_seconds = 3600
         _call(
             db,
             VOICE_BIZ,
@@ -537,6 +538,255 @@ class TestConcurrencyRule:
         evaluation = _gate(voice_settings, db, voice_business, voice_lead, provider)
         assert evaluation.decision == ComplianceDecision.BLOCKED
         assert ReasonCode.CONCURRENCY_LIMIT_REACHED in _reason_codes(evaluation)
+
+
+# ---------------------------------------------------------------------------
+# The development-only quota override
+# ---------------------------------------------------------------------------
+
+
+class TestDevelopmentQuotaOverride:
+    """The two daily quotas can be skipped in a development environment.
+
+    The override needs two explicit opt-ins — ``CALLORA_DISABLE_CALL_QUOTAS``
+    *and* a development ``CALLORA_ENVIRONMENT`` — and it relaxes nothing
+    but the daily per-lead and per-business quotas. Every other check of
+    the gate keeps blocking.
+    """
+
+    @staticmethod
+    def _enable(settings, environment: str = "local") -> None:
+        settings.disable_call_quotas = True
+        settings.environment = environment
+
+    def test_the_quotas_are_enforced_by_default(
+        self, voice_settings, db, voice_business, voice_lead, voice_consent, provider
+    ):
+        """The default deployment enforces both daily quotas."""
+        assert voice_settings.disable_call_quotas is False
+        assert voice_settings.call_quotas_disabled is False
+        voice_business.max_calls_per_lead_per_day = 1
+        db.commit()
+        _call(db, VOICE_BIZ, voice_lead.id, CallStatus.COMPLETED)
+        evaluation = _gate(voice_settings, db, voice_business, voice_lead, provider)
+        assert evaluation.decision == ComplianceDecision.BLOCKED
+        assert ReasonCode.DAILY_LEAD_QUOTA_EXCEEDED in _reason_codes(evaluation)
+
+    def test_the_daily_lead_quota_is_skipped_in_a_development_environment(
+        self, voice_settings, db, voice_business, voice_lead, voice_consent, provider
+    ):
+        self._enable(voice_settings)
+        voice_business.max_calls_per_lead_per_day = 1
+        db.commit()
+        _call(db, VOICE_BIZ, voice_lead.id, CallStatus.COMPLETED)
+        evaluation = _gate(voice_settings, db, voice_business, voice_lead, provider)
+        assert evaluation.allowed is True
+        quota = _check(evaluation, "quota")
+        assert quota.outcome == CheckOutcome.SKIPPED
+        assert quota.mandatory is False
+        assert quota.details["disabled"] is True
+
+    def test_the_daily_business_quota_is_skipped_in_a_development_environment(
+        self, voice_settings, db, voice_business, voice_lead, voice_consent, provider
+    ):
+        self._enable(voice_settings)
+        voice_business.max_calls_per_business_per_day = 1
+        db.commit()
+        other_lead = Lead(
+            id="lead_other_0003",
+            business_id=VOICE_BIZ,
+            name="Priya Patel",
+            phone="+919812345679",
+            source="test",
+        )
+        db.add(other_lead)
+        db.commit()
+        _call(db, VOICE_BIZ, other_lead.id, CallStatus.COMPLETED)
+        evaluation = _gate(voice_settings, db, voice_business, voice_lead, provider)
+        assert evaluation.allowed is True
+        assert _check(evaluation, "quota").outcome == CheckOutcome.SKIPPED
+
+    def test_the_override_is_refused_in_production(
+        self, voice_settings, db, voice_business, voice_lead, voice_consent, provider
+    ):
+        """The flag alone does not relax anything in production."""
+        self._enable(voice_settings, environment="production")
+        voice_business.max_calls_per_lead_per_day = 1
+        db.commit()
+        _call(db, VOICE_BIZ, voice_lead.id, CallStatus.COMPLETED)
+        evaluation = _gate(voice_settings, db, voice_business, voice_lead, provider)
+        assert evaluation.decision == ComplianceDecision.BLOCKED
+        assert ReasonCode.DAILY_LEAD_QUOTA_EXCEEDED in _reason_codes(evaluation)
+
+    def test_an_unknown_environment_is_treated_as_production(
+        self, voice_settings, db, voice_business, voice_lead, voice_consent, provider
+    ):
+        """A misspelled environment name never unlocks the override."""
+        self._enable(voice_settings, environment="prodction")
+        voice_business.max_calls_per_lead_per_day = 1
+        db.commit()
+        _call(db, VOICE_BIZ, voice_lead.id, CallStatus.COMPLETED)
+        evaluation = _gate(voice_settings, db, voice_business, voice_lead, provider)
+        assert evaluation.decision == ComplianceDecision.BLOCKED
+        assert ReasonCode.DAILY_LEAD_QUOTA_EXCEEDED in _reason_codes(evaluation)
+
+    def test_the_override_needs_the_flag_too(
+        self, voice_settings, db, voice_business, voice_lead, voice_consent, provider
+    ):
+        """A development environment alone does not relax the quotas."""
+        voice_settings.environment = "local"
+        voice_business.max_calls_per_lead_per_day = 1
+        db.commit()
+        _call(db, VOICE_BIZ, voice_lead.id, CallStatus.COMPLETED)
+        evaluation = _gate(voice_settings, db, voice_business, voice_lead, provider)
+        assert evaluation.decision == ComplianceDecision.BLOCKED
+        assert ReasonCode.DAILY_LEAD_QUOTA_EXCEEDED in _reason_codes(evaluation)
+
+    def test_consent_still_blocks_the_call(
+        self, voice_settings, db, voice_business, voice_lead, provider
+    ):
+        """Skipping the quotas never relaxes the consent rule."""
+        self._enable(voice_settings)
+        voice_business.max_calls_per_lead_per_day = 1
+        db.commit()
+        _call(db, VOICE_BIZ, voice_lead.id, CallStatus.COMPLETED)
+        evaluation = _gate(voice_settings, db, voice_business, voice_lead, provider)
+        assert evaluation.decision == ComplianceDecision.BLOCKED
+        assert ReasonCode.CONSENT_MISSING in _reason_codes(evaluation)
+
+    def test_revoked_consent_still_blocks_the_call(
+        self, voice_settings, db, voice_business, voice_lead, voice_consent, provider
+    ):
+        self._enable(voice_settings)
+        voice_consent.status = "revoked"
+        voice_consent.revoked_at = datetime.now(timezone.utc)
+        db.commit()
+        evaluation = _gate(voice_settings, db, voice_business, voice_lead, provider)
+        assert evaluation.decision == ComplianceDecision.BLOCKED
+        assert ReasonCode.CONSENT_REVOKED in _reason_codes(evaluation)
+
+    def test_dnd_still_blocks_the_call(
+        self, voice_settings, db, voice_business, voice_lead, voice_consent, provider
+    ):
+        """Skipping the quotas never relaxes the do-not-disturb rule."""
+        self._enable(voice_settings)
+        repo.add_dnd_entry(
+            db,
+            business_id=VOICE_BIZ,
+            phone=VOICE_PHONE,
+            reason="the lead asked not to be called",
+            source="test",
+        )
+        db.commit()
+        evaluation = _gate(voice_settings, db, voice_business, voice_lead, provider)
+        assert evaluation.decision == ComplianceDecision.BLOCKED
+        assert ReasonCode.DND_ACTIVE in _reason_codes(evaluation)
+
+    def test_the_do_not_call_flag_still_blocks_the_call(
+        self, voice_settings, db, voice_business, voice_lead, voice_consent, provider
+    ):
+        self._enable(voice_settings)
+        repo.upsert_lead_profile(db, VOICE_BIZ, voice_lead.id, {"do_not_call": True})
+        db.commit()
+        evaluation = _gate(voice_settings, db, voice_business, voice_lead, provider)
+        assert evaluation.decision == ComplianceDecision.BLOCKED
+        assert ReasonCode.DND_LEAD_FLAG in _reason_codes(evaluation)
+
+    def test_the_calling_window_still_blocks_the_call(
+        self, voice_settings, db, voice_business, voice_lead, voice_consent, provider
+    ):
+        self._enable(voice_settings)
+        voice_business.calling_window_start = 10
+        voice_business.calling_window_end = 19
+        db.commit()
+        # 21:00 in Asia/Kolkata == 15:30 UTC.
+        evening = datetime(2026, 3, 11, 15, 30, tzinfo=timezone.utc)
+        evaluation = _gate(
+            voice_settings, db, voice_business, voice_lead, provider, now=evening
+        )
+        assert evaluation.decision == ComplianceDecision.BLOCKED
+        assert ReasonCode.OUTSIDE_CALLING_HOURS in _reason_codes(evaluation)
+
+    def test_the_duplicate_call_protection_still_blocks_the_call(
+        self, voice_settings, db, voice_business, voice_lead, voice_consent, provider
+    ):
+        """A call in flight is still refused, quota or not."""
+        self._enable(voice_settings)
+        _call(db, VOICE_BIZ, voice_lead.id, CallStatus.QUEUED)
+        evaluation = _gate(voice_settings, db, voice_business, voice_lead, provider)
+        assert evaluation.decision == ComplianceDecision.BLOCKED
+        assert ReasonCode.DUPLICATE_CALL_IN_FLIGHT in _reason_codes(evaluation)
+
+    def test_the_concurrency_limit_still_blocks_the_call(
+        self, voice_settings, db, voice_business, voice_lead, voice_consent, provider
+    ):
+        self._enable(voice_settings)
+        voice_business.max_concurrent_calls = 1
+        db.commit()
+        _call(db, VOICE_BIZ, "lead_other_0004", CallStatus.RINGING)
+        evaluation = _gate(voice_settings, db, voice_business, voice_lead, provider)
+        assert evaluation.decision == ComplianceDecision.BLOCKED
+        assert ReasonCode.CONCURRENCY_LIMIT_REACHED in _reason_codes(evaluation)
+
+    def test_an_inactive_business_still_blocks_the_call(
+        self, voice_settings, db, voice_business, voice_lead, voice_consent, provider
+    ):
+        self._enable(voice_settings)
+        voice_business.is_active = False
+        db.commit()
+        evaluation = _gate(voice_settings, db, voice_business, voice_lead, provider)
+        assert evaluation.decision == ComplianceDecision.BLOCKED
+        assert ReasonCode.BUSINESS_INACTIVE in _reason_codes(evaluation)
+
+    def test_the_decision_is_still_auditable(
+        self, voice_settings, db, voice_business, voice_lead, voice_consent, provider
+    ):
+        """Every check is reported, and the bypass is visible in it."""
+        self._enable(voice_settings)
+        evaluation = _gate(voice_settings, db, voice_business, voice_lead, provider)
+        assert {c.name for c in evaluation.checks} == set(CHECK_NAMES)
+        quota = _check(evaluation, "quota")
+        assert quota.details["disabled"] is True
+        assert quota.details["environment"] == "local"
+
+
+class TestQuotaOverrideSettings:
+    """The guard that keeps the override out of production."""
+
+    def test_the_environment_variables_enable_the_override(self, monkeypatch):
+        monkeypatch.setenv("CALLORA_DISABLE_CALL_QUOTAS", "true")
+        monkeypatch.setenv("CALLORA_ENVIRONMENT", "local")
+        settings = Settings(_env_file=None)
+        assert settings.disable_call_quotas is True
+        assert settings.call_quotas_disabled is True
+
+    def test_the_override_is_off_by_default(self, monkeypatch):
+        monkeypatch.delenv("CALLORA_DISABLE_CALL_QUOTAS", raising=False)
+        monkeypatch.setenv("CALLORA_ENVIRONMENT", "local")
+        settings = Settings(_env_file=None)
+        assert settings.disable_call_quotas is False
+        assert settings.call_quotas_disabled is False
+
+    def test_production_refuses_the_override(self, monkeypatch):
+        monkeypatch.setenv("CALLORA_DISABLE_CALL_QUOTAS", "true")
+        monkeypatch.setenv("CALLORA_ENVIRONMENT", "production")
+        settings = Settings(_env_file=None)
+        assert settings.disable_call_quotas is True
+        assert settings.call_quotas_disabled is False
+
+    def test_an_unknown_environment_refuses_the_override(self, monkeypatch):
+        """An unrecognised name is never a development environment."""
+        monkeypatch.setenv("CALLORA_DISABLE_CALL_QUOTAS", "true")
+        monkeypatch.setenv("CALLORA_ENVIRONMENT", "staging")
+        settings = Settings(_env_file=None)
+        assert settings.is_development is False
+        assert settings.call_quotas_disabled is False
+
+    def test_the_environment_name_is_case_insensitive(self, monkeypatch):
+        monkeypatch.setenv("CALLORA_DISABLE_CALL_QUOTAS", "true")
+        monkeypatch.setenv("CALLORA_ENVIRONMENT", "Local")
+        settings = Settings(_env_file=None)
+        assert settings.call_quotas_disabled is True
 
 
 # ---------------------------------------------------------------------------

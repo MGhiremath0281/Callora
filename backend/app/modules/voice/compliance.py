@@ -14,6 +14,12 @@ call. An unavailable mandatory check must never default to approval.
 **PostgreSQL is the source of truth.** Redis may cache DND lookups, but a
 cached answer is never the sole basis for a decision: the registry is
 always queried.
+
+**One development-only exception.** The two daily quotas (per lead and
+per business) can be skipped by a deployment that explicitly asks for it
+(``CALLORA_DISABLE_CALL_QUOTAS`` in a development environment). No other
+check can be skipped, and the override is refused outside a development
+environment — see ``Settings.call_quotas_disabled``.
 """
 
 import abc
@@ -44,6 +50,18 @@ audit_logger = logging.getLogger("callora.voice.compliance")
 
 #: Version tag stored on every compliance decision.
 POLICY_VERSION = "v1"
+
+
+def _describe_duration(seconds: int) -> str:
+    """Human readable duration for a message about a time window.
+
+    The setting is expressed in seconds, so a short window reads the way
+    it was configured ("60 seconds"); a window of whole minutes reads
+    better in minutes ("60 minutes").
+    """
+    if seconds >= 120 and seconds % 60 == 0:
+        return f"{seconds // 60} minutes"
+    return f"{seconds} second" if seconds == 1 else f"{seconds} seconds"
 
 
 @dataclass
@@ -436,6 +454,20 @@ class ComplianceGate:
         )
 
     def _check_duplicate_call(self, ctx: ComplianceContext) -> CheckResult:
+        """Two separate rules protect a lead from a duplicate call.
+
+        **The in-flight guard.** A call the provider still reports as
+        queued, ringing or active blocks a second call to the same lead
+        until it reaches a terminal state. This rule is mandatory and
+        completely independent of the cooldown below: it is never weakened
+        by a shorter (or disabled) cooldown, and it is evaluated first.
+
+        **The cooldown.** After the previous call ended, the lead is
+        protected for a configurable gap (``CALLORA_VOICE_DUPLICATE_CALL_
+        COOLDOWN_SECONDS``, 60 minutes by default). The gap is measured in
+        seconds so a local development deployment can shorten it without a
+        code change.
+        """
         business = ctx.business
         lead = ctx.lead
         if lead is None:
@@ -460,6 +492,9 @@ class ComplianceGate:
             .first()
         )
         if in_flight is not None:
+            # The previous call is still queued, ringing or active: the
+            # provider has not confirmed a terminal state, so a second call
+            # is refused no matter how short the cooldown is.
             return CheckResult(
                 name="duplicate_call",
                 outcome=CheckOutcome.FAILED,
@@ -467,9 +502,9 @@ class ComplianceGate:
                 reason="another call to this lead is already in progress",
                 details={"call_id": in_flight.id, "status": in_flight.status},
             )
-        cooldown = self._settings.voice_duplicate_call_cooldown_minutes
-        if cooldown > 0:
-            since = ctx.now - timedelta(minutes=cooldown)
+        cooldown_seconds = self._settings.duplicate_call_cooldown_seconds
+        if cooldown_seconds > 0:
+            since = ctx.now - timedelta(seconds=cooldown_seconds)
             recent = repo.find_recent_call_for_lead(
                 self._session, business.id, lead.id, since
             )
@@ -480,19 +515,23 @@ class ComplianceGate:
                     reason_code=ReasonCode.DUPLICATE_CALL_COOLDOWN,
                     reason=(
                         "this lead was called less than "
-                        f"{cooldown} minutes ago"
+                        f"{_describe_duration(cooldown_seconds)} ago"
                     ),
                     details={
                         "call_id": recent.id,
                         "status": recent.status,
-                        "cooldown_minutes": cooldown,
+                        "cooldown_seconds": cooldown_seconds,
+                        "cooldown_minutes": cooldown_seconds // 60,
                     },
                 )
         return CheckResult(
             name="duplicate_call",
             outcome=CheckOutcome.PASSED,
             reason="no conflicting call exists for this lead",
-            details={"cooldown_minutes": cooldown},
+            details={
+                "cooldown_seconds": cooldown_seconds,
+                "cooldown_minutes": cooldown_seconds // 60,
+            },
         )
 
     def _check_quota(self, ctx: ComplianceContext) -> CheckResult:
@@ -501,6 +540,26 @@ class ComplianceGate:
         tz_name = business.timezone
         per_lead = business.max_calls_per_lead_per_day
         per_business = business.max_calls_per_business_per_day
+        if self._settings.call_quotas_disabled:
+            # Development-only: the two daily quotas are not evaluated.
+            # Nothing else is relaxed — every other check of the gate still
+            # runs and still blocks. The decision records that the quotas
+            # were skipped, so the bypass stays auditable.
+            return CheckResult(
+                name="quota",
+                outcome=CheckOutcome.SKIPPED,
+                mandatory=False,
+                reason=(
+                    "the daily call quotas are disabled for this development "
+                    "environment"
+                ),
+                details={
+                    "disabled": True,
+                    "environment": self._settings.environment,
+                    "per_lead": per_lead,
+                    "per_business": per_business,
+                },
+            )
         if lead is not None and per_lead:
             used = repo.count_attempts_today(
                 self._session, business.id, tz_name, lead_id=lead.id

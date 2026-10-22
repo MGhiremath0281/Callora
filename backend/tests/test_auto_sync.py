@@ -138,11 +138,11 @@ class TestRouteRegistration:
             f"Expected 20 non-voice operations, got {len(legacy_ops)}: "
             f"{sorted(legacy_ops)}"
         )
-        assert len(voice_ops) == 30, (
-            f"Expected 30 voice operations, got {len(voice_ops)}: "
+        assert len(voice_ops) == 31, (
+            f"Expected 31 voice operations, got {len(voice_ops)}: "
             f"{sorted(voice_ops)}"
         )
-        assert len(ops) == 50, f"Expected 50 operations, got {len(ops)}: {sorted(ops)}"
+        assert len(ops) == 51, f"Expected 51 operations, got {len(ops)}: {sorted(ops)}"
 
     def test_no_unversioned_leads_routes(self):
         """No unversioned /leads or /imports routes exist."""

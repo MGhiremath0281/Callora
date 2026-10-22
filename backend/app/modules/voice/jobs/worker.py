@@ -23,9 +23,11 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings, get_settings
 from app.db.session import get_session_factory
+from app.modules.voice import sync
 from app.modules.voice.errors import LLMUnavailableError
 from app.modules.voice.jobs import queue
 from app.modules.voice.jobs.handlers import DEFAULT_HANDLERS
+from app.modules.voice.providers.base import VoiceProvider
 from app.logging_config import setup_logging
 
 logger = logging.getLogger("callora.voice.jobs.worker")
@@ -48,12 +50,15 @@ class Worker:
         handlers: Optional[Dict[str, Callable[[Session, Any], Any]]] = None,
         worker_id: Optional[str] = None,
         job_types: Optional[List[str]] = None,
+        provider: Optional[VoiceProvider] = None,
     ) -> None:
         self._settings = settings or get_settings()
         self._session_factory = session_factory or get_session_factory()
         self._handlers = handlers if handlers is not None else dict(DEFAULT_HANDLERS)
         self._worker_id = worker_id or default_worker_id()
         self._job_types = job_types
+        self._provider = provider
+        self._last_sync: Optional[float] = None
 
     # -- one iteration -----------------------------------------------------
 
@@ -110,6 +115,51 @@ class Worker:
         session.commit()
         logger.info("job_succeeded", extra={"job_id": job.id, "type": job.type})
 
+    # -- the reconciliation sweep ------------------------------------------
+
+    def run_sync(self) -> None:
+        """Reconcile the calls whose status the provider did not report.
+
+        The provider webhook is the fast path. This sweep is the safety
+        net: it asks the provider about the calls that are due for a
+        check, so a call can never stay in ``scheduled`` because a
+        webhook was lost.
+        """
+        session = self._session_factory()
+        try:
+            report = sync.sweep(session, self._settings, provider=self._provider)
+            session.commit()
+        except Exception:
+            session.rollback()
+            logger.exception("status_sync_failed")
+            return
+        finally:
+            try:
+                session.close()
+            except Exception:  # pragma: no cover - defensive
+                pass
+        logger.info(
+            "status_sync_completed",
+            extra={
+                "checked": report.checked,
+                "applied": report.applied,
+                "unchanged": report.unchanged,
+                "skipped": report.skipped,
+                "failed": report.failed,
+            },
+        )
+
+    def _maybe_sync(self) -> None:
+        """Run the sweep when it is due."""
+        interval = self._settings.voice_status_sync_interval_seconds
+        if interval <= 0:
+            return
+        now = time.monotonic()
+        if self._last_sync is not None and now - self._last_sync < interval:
+            return
+        self._last_sync = now
+        self.run_sync()
+
     # -- long running ------------------------------------------------------
 
     def run_forever(self, interval: float = 2.0, max_iterations: Optional[int] = None) -> None:
@@ -133,6 +183,10 @@ class Worker:
             except Exception:  # pragma: no cover - defensive
                 logger.exception("worker_iteration_failed")
                 processed = 0
+            try:
+                self._maybe_sync()
+            except Exception:  # pragma: no cover - defensive
+                logger.exception("worker_status_sync_failed")
             iterations += 1
             if max_iterations is not None and iterations >= max_iterations:
                 break

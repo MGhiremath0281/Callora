@@ -62,6 +62,10 @@ frontend in this milestone.
                   │ POST /call/id/stop │     └──────────────────────────┘
                   └─────────┬──────────┘
                             │ webhook (execution / pre-transfer)
+                            │        ▲
+                            │        └── reconciliation sweep (poll
+                            │            the provider for the calls it
+                            │            never reported on)
                             ▼
                   ┌──────────────────────────────────────────┐
                   │ WebhookService                          │
@@ -93,6 +97,8 @@ frontend in this milestone.
 | `backend/app/modules/voice/compliance.py` | The nine mandatory pre-call checks |
 | `backend/app/modules/voice/orchestrator.py` | The only component allowed to contact a provider |
 | `backend/app/modules/voice/providers/` | Provider adapters (`bolna.py`) behind a registry |
+| `backend/app/modules/voice/lifecycle.py` | The shared call state machine (one place decides what a status change means) |
+| `backend/app/modules/voice/sync.py` | The reconciliation sweep (poll the provider for the calls it never reported on) |
 | `backend/app/modules/voice/webhooks/service.py` | Signature, dedupe, ordering, persistence |
 | `backend/app/modules/voice/jobs/` | Durable queue, handlers, worker |
 | `backend/app/modules/voice/postcall/` | LangGraph workflow, prompts, LLM client |
@@ -205,6 +211,7 @@ default; nothing is required to boot the service.
 | `CALLORA_API_KEYS` | `biz_001:dev-key-biz-001` | `business_id:api_key` pairs, comma separated. Resolves the `X-API-Key` header. |
 | `CALLORA_LOG_LEVEL` | `INFO` | Root log level. |
 | `CALLORA_DEBUG` | `false` | `true` re-raises unhandled exceptions instead of masking them as a 500. |
+| `CALLORA_ENVIRONMENT` | `production` | Deployment environment marker. Only `local`, `development`, `dev`, `test` and `testing` unlock the development-only overrides below; every other value (including a typo) is treated as production. |
 
 ### Voice provider — Bolna
 
@@ -215,7 +222,7 @@ default; nothing is required to boot the service.
 | `CALLORA_BOLNA_TIMEOUT_SECONDS` | `20.0` | Per-request timeout for provider calls. |
 | `CALLORA_BOLNA_WEBHOOK_SECRET` | *(unset)* | Enables HMAC-SHA256 verification of webhook signatures. See [Webhook signature](#54-webhook-signature). |
 | `CALLORA_BOLNA_DEFAULT_AGENT_ID` | *(unset)* | Fallback Bolna agent when a business has none. |
-| `CALLORA_BOLNA_DEFAULT_FROM_NUMBER` | *(unset)* | Fallback caller id in E.164. |
+| `CALLORA_BOLNA_DEFAULT_FROM_NUMBER` | *(unset)* | Optional fallback caller id in E.164. When it is unset (or empty) the caller-number field is left out of the Bolna request and Bolna places the call through the telephony provider of the agent. |
 | `CALLORA_VOICE_PROVIDER_MAX_ATTEMPTS` | `3` | Attempts when the provider is *unreachable*. |
 | `CALLORA_VOICE_PROVIDER_RETRY_BACKOFF_SECONDS` | `1.0` | Linear backoff between those attempts. |
 
@@ -233,10 +240,26 @@ editable through `PATCH /api/v1/voice/business`.
 | `CALLORA_VOICE_DEFAULT_CALLING_WINDOW_END` | `19` | Hour (local) the window closes. `start == end` means "no restriction". |
 | `CALLORA_VOICE_MAX_CALLS_PER_LEAD_PER_DAY` | `1` | Per-lead daily quota. |
 | `CALLORA_VOICE_MAX_CALLS_PER_BUSINESS_PER_DAY` | `500` | Per-business daily quota. |
+| `CALLORA_DISABLE_CALL_QUOTAS` | `false` | **Development only.** Skips the two daily quotas above. Honoured only when `CALLORA_ENVIRONMENT` names a development environment; everywhere else the flag is ignored (and logged) and the quotas stay enforced. See [Development-only: skipping the daily quotas](#development-only-skipping-the-daily-quotas). |
 | `CALLORA_VOICE_MAX_CONCURRENT_CALLS` | `5` | Calls allowed in flight at the same time. |
-| `CALLORA_VOICE_DUPLICATE_CALL_COOLDOWN_MINUTES` | `60` | Minimum gap between two calls to the same lead. `0` disables it. |
+| `CALLORA_VOICE_DUPLICATE_CALL_COOLDOWN_SECONDS` | `3600` | Minimum gap between two calls to the same lead, in seconds. The default is 60 minutes; a local development deployment can lower it (e.g. `60`). `0` disables it. The in-flight guard is never affected by this value. |
 | `CALLORA_VOICE_SUPPORTED_LANGUAGES` | `en,hi,kn` | Languages the deployment is configured for. |
 | `CALLORA_VOICE_RATE_LIMIT_PER_MINUTE` | `60` | Per-business call-initiation limit (Redis counter). |
+
+### Call status reconciliation
+
+The provider webhook is the fast path; the reconciliation sweep is the safety
+net for the webhooks that never arrive (the Bolna agent without a
+`webhook_url`, a dropped request, a rejected payload). See
+[Call status synchronization](#55-call-status-synchronization).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CALLORA_VOICE_STATUS_POLL_INTERVAL_SECONDS` | `60` | Minimum age of the last provider check before a call is checked again. |
+| `CALLORA_VOICE_STATUS_SYNC_INTERVAL_SECONDS` | `60` | How often the worker runs the sweep. `0` disables it (the operator endpoint still works). |
+| `CALLORA_VOICE_STATUS_SYNC_MAX_CALLS_PER_SWEEP` | `50` | How many calls are checked in one sweep. |
+| `CALLORA_VOICE_SCHEDULED_CALL_TIMEOUT_SECONDS` | `900` | How long a call may stay in a pre-dial state (`pending` / `scheduled` / `queued`) before the timeout policy applies. The provider is always asked first. |
+| `CALLORA_VOICE_STUCK_CALL_TIMEOUT_ACTION` | `fail` | `fail` closes a stuck pre-dial call as `failed`; `keep_polling` only reports it. A call in `initiated`, `ringing` or `in_progress` is never closed by the timeout. |
 
 ### Redis (accelerator)
 
@@ -279,8 +302,8 @@ endpoint that skips it.
 | 3 | `consent` | No voice consent record, or it is revoked/expired. Skipped when the business sets `require_consent = false`. |
 | 4 | `dnd` | The number is on the local DND registry, the lead is flagged `do_not_call`, or an external DND source reports it. |
 | 5 | `calling_hours` | The local time is outside the permitted window, or the weekday is not allowed. |
-| 6 | `duplicate_call` | Another call to this lead is in flight, or the lead was called less than the cooldown ago. |
-| 7 | `quota` | The per-lead or per-business daily quota is exhausted. |
+| 6 | `duplicate_call` | Another call to this lead is in flight (Bolna still reports it as queued, ringing or active), or the lead was called less than the cooldown ago. |
+| 7 | `quota` | The per-lead or per-business daily quota is exhausted. **Skipped in a development environment** that explicitly disables the daily quotas — nothing else is. |
 | 8 | `concurrency` | The business already has `max_concurrent_calls` calls in flight. |
 | 9 | `provider_ready` | No agent id is configured, or the provider credentials are missing. **Skipped for a simulated call** — the provider is never contacted, so it has no credentials to check. |
 
@@ -307,6 +330,88 @@ account**. The moment a call would really be placed the check is mandatory
 again: with outbound calling enabled and no credentials the request is
 still rejected with `403 compliance_blocked` /
 `provider_not_configured`, and no provider request is ever made.
+
+### Development-only: skipping the daily quotas
+
+The per-lead daily quota defaults to **one** call, so a second test call to
+the same lead on the same day is refused with
+`daily_lead_quota_exceeded`. A local deployment can skip the two daily
+quotas (per lead and per business) while it exercises an integration:
+
+```bash
+# .env — local development only
+CALLORA_ENVIRONMENT=local
+CALLORA_DISABLE_CALL_QUOTAS=true
+```
+
+Both variables are required, and the pair is refused outside a
+development environment:
+
+| `CALLORA_ENVIRONMENT` | `CALLORA_DISABLE_CALL_QUOTAS` | Result |
+|---|---|---|
+| `local`, `development`, `dev`, `test`, `testing` | `true` | The two daily quotas are skipped. |
+| `local`, `development`, `dev`, `test`, `testing` | `false` | The quotas are enforced. |
+| `production` (or any other/unknown value) | `true` | The quotas are enforced; the override is refused and logged as `call_quota_override_refused`. |
+
+**Only the two daily quotas are skipped.** Every other check of the gate
+still runs and still blocks the call: the business must be active, the lead
+must have a valid number and a granted voice consent, the number must not
+be on a do-not-disturb list, the call must be inside the permitted calling
+window, another call to the same lead must not be in flight, the
+concurrency cap must not be reached, and the provider must be ready. The
+decision records the bypass, so it stays auditable:
+
+```json
+{"name": "quota", "outcome": "skipped", "mandatory": false,
+ "reason": "the daily call quotas are disabled for this development environment",
+ "details": {"disabled": true, "environment": "local",
+             "per_lead": 1, "per_business": 500}}
+```
+
+`GET /api/v1/voice/business` reports the state of the override as
+`call_quotas_disabled`.
+
+**The other call-frequency rules are not affected** and can still refuse a
+repeated test call. Relax them explicitly (and only locally) when you need
+to:
+
+| Rule | Setting | Default |
+|---|---|---|
+| Minimum gap between two calls to the same lead | `CALLORA_VOICE_DUPLICATE_CALL_COOLDOWN_SECONDS` | `3600` (60 minutes) (`0` disables it) |
+| Calls in flight per business | `max_concurrent_calls` (per business) | `5` |
+| Call initiations per minute | `CALLORA_VOICE_RATE_LIMIT_PER_MINUTE` | `60` |
+| Permitted calling window | `calling_window_start` / `calling_window_end` (per business) | `10`–`19` local |
+
+### The duplicate-call cooldown and the in-flight guard
+
+The `duplicate_call` check is **two independent rules**, and both are
+mandatory:
+
+1. **The in-flight guard.** While Bolna still reports the previous call as
+   queued, ringing or active, a second call to the same lead is refused
+   (`duplicate_call_in_flight`). It is evaluated first and is never
+   weakened by the cooldown below — not even when the cooldown is `0`.
+2. **The cooldown.** After the previous call reached a terminal state
+   (completed, failed, cancelled, …), the lead is protected for a
+   configurable gap (`duplicate_call_cooldown`). The gap is measured in
+   **seconds**, so a local deployment can make a repeated test call
+   possible without waiting for an hour:
+
+```bash
+# .env — local development only
+CALLORA_VOICE_DUPLICATE_CALL_COOLDOWN_SECONDS=60
+```
+
+| Setting | Value | Effect |
+|---|---|---|
+| `CALLORA_VOICE_DUPLICATE_CALL_COOLDOWN_SECONDS` | unset | The production default of 3600 seconds (60 minutes). |
+| `CALLORA_VOICE_DUPLICATE_CALL_COOLDOWN_SECONDS` | `60` | A second call to the same lead is allowed 60 seconds after the previous one. |
+| `CALLORA_VOICE_DUPLICATE_CALL_COOLDOWN_SECONDS` | `0` | The cooldown is disabled. The in-flight guard still blocks. |
+
+The deprecated `CALLORA_VOICE_DUPLICATE_CALL_COOLDOWN_MINUTES` is still
+honoured when the seconds variable is not set, and it keeps its unit: a
+legacy `60` still means 60 minutes, never 60 seconds. When both are set,
+the seconds variable wins.
 
 ### What a decision produces
 
@@ -369,10 +474,11 @@ never another tenant's data.
 | `POST` | `/ops/jobs/{job_id}/retry` | Re-queue a dead job (audited). |
 | `GET` | `/ops/audit` | Read the audit trail. |
 | `GET` | `/ops/compliance-decisions` | Read the persisted compliance decisions. |
+| `POST` | `/ops/sync-calls` | Reconcile the calls with the provider (manual version of the background sweep). |
 | `POST` | `/webhooks/bolna/execution` | **Provider webhook** — call lifecycle events. |
 | `POST` | `/webhooks/bolna/pre-transfer` | **Provider webhook** — warm-transfer events. |
 
-24 paths, 30 operations. The full, always-current contract is the OpenAPI
+25 paths, 31 operations. The full, always-current contract is the OpenAPI
 document at `/openapi.json` (`/docs` renders it).
 
 ### 5.1 Requesting a call
@@ -438,6 +544,11 @@ call), `409` (`idempotency_conflict`), `422` (validation), `429`
 (`rate_limit_exceeded`), `503`/`502`/`504` (provider unreachable / error /
 timeout).
 
+The caller number is optional: send `"from_number"` to call from a
+specific number, otherwise the number of the business
+(`bolna_from_number`) or the deployment default is used — and when none
+of them is set, Bolna places the call itself (no caller number is sent).
+
 ### 5.2 The webhook endpoints
 
 The webhook endpoints are **not** protected by `X-API-Key` — the caller is
@@ -451,6 +562,10 @@ Bolna, not a tenant.
   `{"status": "duplicate"}` — the provider must not retry it.
 * A call never moves backwards. A late `initiated` event on a `completed`
   call is stored but ignored (`{"status": "ignored_out_of_order"}`).
+* A status Callora does not know never terminates a call. It says nothing
+  about whether the call is over, so the call keeps its status, keeps the
+  duplicate-call guard and queues no post-call work. The status is stored
+  and the reconciliation sweep resolves it by polling the provider.
 * An event that matches no known call is stored and acknowledged with
   `{"status": "unmatched"}`.
 * A terminal status queues the post-call job (never runs the analysis
@@ -494,6 +609,91 @@ what is stuck" without a database client:
   "currency": "INR"
 }
 ```
+
+`POST /api/v1/voice/ops/sync-calls` reconciles the calls of the business with
+the provider — the manual version of the background sweep (see
+[Call status synchronization](#55-call-status-synchronization)):
+
+```json
+{
+  "business_id": "biz_001",
+  "checked": 3,
+  "applied": 1,
+  "unchanged": 2,
+  "skipped": 0,
+  "failed": 0,
+  "outcomes": [
+    {
+      "call_id": "call_6144f2be5cc64f46",
+      "execution_id": "a6a1e2e5-3620-426d-9f54-5cad8f807509",
+      "action": "applied",
+      "previous_status": "scheduled",
+      "status": "initiated",
+      "provider_status": "initiated",
+      "detail": "the call status is now 'initiated'"
+    }
+  ]
+}
+```
+
+The `action` of an outcome is one of `applied` (the provider moved the call
+forward), `unchanged` (the provider agrees with Callora), `out_of_order` (the
+provider reported an older status), `unknown_provider_status` (the provider
+reported a status Callora does not know — the call was left alone),
+`provider_unreachable` / `provider_error` (the provider could not be asked —
+the call was left alone), `execution_missing` (the provider does not know the
+execution any more), `timeout` (the timeout policy closed the call),
+`not_placed` (the call was never handed to the provider) or `not_due` (the
+call is scheduled for later).
+
+### 5.5 Call status synchronization
+
+A call has to end, even when the provider never tells Callora how it ended.
+The synchronization has two paths and one set of rules.
+
+**The fast path — the provider webhook.** Bolna pushes an execution event to
+`/api/v1/voice/webhooks/bolna/execution` whenever the status of a call
+changes. This is the normal path; see
+[the webhook endpoints](#52-the-webhook-endpoints).
+
+> **The Bolna agent needs a webhook URL.** Without
+> `webhook_url` on the agent, Bolna never pushes an event, and the call only
+> moves through the sweep below. Set it to
+> `https://<your-host>/api/v1/voice/webhooks/bolna/execution`.
+
+**The safety net — the reconciliation sweep.** The worker polls the provider
+for the calls it has not heard about. A call is checked when it is *due* (a
+scheduled call from its `scheduled_at`, every other call from the moment the
+provider accepted it) and at most once per
+`CALLORA_VOICE_STATUS_POLL_INTERVAL_SECONDS`. The sweep runs every
+`CALLORA_VOICE_STATUS_SYNC_INTERVAL_SECONDS` and checks at most
+`CALLORA_VOICE_STATUS_SYNC_MAX_CALLS_PER_SWEEP` calls.
+
+Both paths use the same state machine (`voice/lifecycle.py`), so they cannot
+disagree:
+
+* a call never moves backwards — the statuses are ranked, and an older event
+  is ignored;
+* a terminal status is never overwritten by a later event;
+* an unknown provider status never terminates a call;
+* a terminal status ends the call (`ended_at`), queues the post-call job
+  and releases the duplicate-call guard and the concurrency slot.
+
+**The timeout policy.** A call that never got past the dial queue
+(`pending`, `scheduled`, `queued`) and that the provider *still* reports as
+pre-dial more than `CALLORA_VOICE_SCHEDULED_CALL_TIMEOUT_SECONDS` after it
+was due is closed as `failed` (`CALLORA_VOICE_STUCK_CALL_TIMEOUT_ACTION=fail`,
+the default). The provider is always asked first: the call is only closed
+when the provider confirms that it is still waiting. Set the action to
+`keep_polling` to report the stuck call without closing it.
+
+A call that is talking to somebody is **never** closed because time passed.
+`initiated`, `ringing` and `in_progress` are polled, but only the provider
+can end them. A provider that cannot be reached leaves every call untouched.
+
+Every transition is logged with both the Callora call id and the provider
+execution id (`call_id`, `provider_call_id`, `execution_id`), and audited
+(`call.status_updated`, `call.status_synced`, `call.timeout`).
 
 ---
 
@@ -549,9 +749,16 @@ Real calling is a three-step decision. Do not skip step 1.
 ### Step 1 — provider account and agent
 
 Create a Bolna account, provision a phone number and build the agent (the
-prompt, the welcome message, the language). Note the **agent id** and the
-**caller id** (E.164). Put the webhook URL of your deployment on the agent
+prompt, the welcome message, the language). Note the **agent id**. The
+**caller id** (E.164) is optional: without one Bolna places the call
+through the telephony provider configured on the agent (Vobiz, Twilio,
+Plivo, ...). Put the webhook URL of your deployment on the agent
 (`https://<host>/api/v1/voice/webhooks/bolna/execution`).
+
+> **The webhook URL is not optional in practice.** An agent without one makes
+> Bolna push no execution event, and the call then only moves through the
+> reconciliation sweep ([5.5](#55-call-status-synchronization)) — it still
+> ends, but it takes a poll cycle instead of a second.
 
 ### Step 2 — credentials and the compliance policy
 
@@ -564,7 +771,7 @@ start it from:
 # <repo>/.env  — gitignored, never committed
 CALLORA_BOLNA_API_KEY=<your key>
 CALLORA_BOLNA_DEFAULT_AGENT_ID=<agent id>
-CALLORA_BOLNA_DEFAULT_FROM_NUMBER=+91XXXXXXXXXX
+CALLORA_BOLNA_DEFAULT_FROM_NUMBER=+91XXXXXXXXXX   # optional, see below
 CALLORA_BOLNA_WEBHOOK_SECRET=<shared secret>   # optional but recommended
 ```
 
@@ -574,9 +781,18 @@ starts the backend and the worker — shell variables win over the file:
 ```bash
 export CALLORA_BOLNA_API_KEY="<your key>"
 export CALLORA_BOLNA_DEFAULT_AGENT_ID="<agent id>"
-export CALLORA_BOLNA_DEFAULT_FROM_NUMBER="+91XXXXXXXXXX"
+export CALLORA_BOLNA_DEFAULT_FROM_NUMBER="+91XXXXXXXXXX"   # optional
 export CALLORA_BOLNA_WEBHOOK_SECRET="<shared secret>"   # optional but recommended
 ```
+
+> **The caller number is optional.** Bolna's `/call` endpoint takes only
+> the agent id and the recipient: when `from_phone_number` is absent
+> Bolna places the call itself, through the telephony provider of the
+> agent. Leave `CALLORA_BOLNA_DEFAULT_FROM_NUMBER` empty (or unset) and
+> Callora sends no caller number at all. Set it only when the call must
+> come from a specific number — and then only to a number the provider
+> account owns, in E.164: Bolna rejects a number it does not know
+> (`Calling from_number ... doesn't exist for <provider>`).
 
 > **Only the key is needed to exercise the flow.** With
 > `CALLORA_VOICE_ENABLE_OUTBOUND_CALLS=false` (the default) the key is
@@ -673,7 +889,7 @@ Published figures:
 | Risk | Impact | Mitigation in this module |
 |---|---|---|
 | **Calling a number that must not be called** | Regulatory exposure and reputation damage. | The compliance gate is mandatory and fail-closed; consent and DND are checked against PostgreSQL before every call; a blocked call never reaches the provider. |
-| **Unwanted calls / spam complaints** | TRAI and telco penalties, blacklisting of the calling number. | Per-lead daily quota, per-business daily quota, concurrency cap, duplicate-call cooldown, `do_not_call` kill switch, DND registry. |
+| **Unwanted calls / spam complaints** | TRAI and telco penalties, blacklisting of the calling number. | Per-lead daily quota, per-business daily quota, concurrency cap, duplicate-call cooldown, `do_not_call` kill switch, DND registry. The two daily quotas can be skipped in a development environment only — and only with an explicit opt-in; everywhere else they stay enforced. |
 | **Calling outside the permitted hours** | Regulatory exposure. | `calling_hours` check per business timezone and weekday. The default window (10:00–19:00 local) is deliberately inside the 10:00–21:00 window that TRAI's Unsolicited Commercial Communications Regulations set for promotional voice calls. **Confirm the current rule set with counsel.** |
 | **Twice dialling the same lead** | Complaints, wasted minutes. | In-flight check + cooldown + idempotency key on the initiation endpoint. |
 | **Losing a call record (crash between provider call and DB write)** | A call nobody can reconcile. | The decision and the call row are committed **before** the provider is contacted; the provider id is written immediately after, and `POST /calls/{id}/refresh` re-reads the provider state. |
@@ -721,6 +937,7 @@ LLM.** The provider is the `FakeProvider` double, the model is the
 ```bash
 cd backend
 python -m pytest tests/test_voice_compliance.py -q   # the gate
+python -m pytest tests/test_voice_cooldown.py -q    # the duplicate-call cooldown
 python -m pytest tests/test_voice_orchestrator.py -q # call initiation
 python -m pytest tests/test_voice_webhooks.py -q     # webhook intake
 python -m pytest tests/test_voice_jobs.py -q         # the durable queue
@@ -738,12 +955,13 @@ python -m pytest -q                                  # everything
 
 | File | Tests | Covers |
 |---|---|---|
-| `tests/test_voice_compliance.py` | 39 | Every mandatory check in isolation, fail-closed behaviour, DND, consent, calling window, quotas, concurrency, duplicate-call rules, and `provider_ready` in simulated vs. placed mode. |
+| `tests/test_voice_compliance.py` | 59 | Every mandatory check in isolation, fail-closed behaviour, DND, consent, calling window, quotas, concurrency, duplicate-call rules, and `provider_ready` in simulated vs. placed mode. |
+| `tests/test_voice_cooldown.py` | 24 | The configurable duplicate-call cooldown: the production default, the environment variable, the deprecated minute-based variable, the enforced window, and the in-flight guard that stays mandatory. |
 | `tests/test_voice_orchestrator.py` | 29 | Simulated / blocked / provider paths, the retry semantics, the audit trail, `refresh_status`, provider credentials. |
-| `tests/test_voice_webhooks.py` | 23 | Applying events, dedupe, out-of-order delivery, the post-call job, signature verification, the pre-transfer event. |
+| `tests/test_voice_webhooks.py` | 31 | Applying events, dedupe, out-of-order delivery, the post-call job, the duplicate-call guard, signature verification, the pre-transfer event. |
 | `tests/test_voice_jobs.py` | 23 | Enqueue, dedupe key, atomic claim, retries, backoff, dead jobs, stale release, the worker. |
 | `tests/test_voice_postcall.py` | 15 | The LangGraph workflow, qualification, refusals, handoff creation, the degradation path. |
-| `tests/test_voice_api.py` | 73 | Authentication, call initiation, idempotency, the 409 conflict, the rate limit, the webhook endpoints, the handoffs, the ops endpoints, the business configuration, consent and DND. |
+| `tests/test_voice_api.py` | 79 | Authentication, call initiation, idempotency, the 409 conflict, the rate limit, the webhook endpoints, the handoffs, the ops endpoints, the business configuration, consent and DND. |
 
 The whole suite (692 tests, including the legacy modules) runs in about
 **2m37s**. The schema is built once per session and every test starts from
@@ -863,6 +1081,31 @@ curl -s -X POST $BASE/api/v1/voice/calls/<call_id>/refresh -H "$H"
 This polls the provider once and updates the call. It never creates a call
 and it does not re-run the compliance gate (no new call is placed).
 
+### A call that is stuck in `scheduled`
+
+A call that never moved past `scheduled` means the provider never reported
+it — most often because the Bolna agent has no `webhook_url`. Reconcile the
+whole business:
+
+```bash
+curl -s -X POST $BASE/api/v1/voice/ops/sync-calls -H "$H"
+```
+
+The sweep asks the provider about every call that is due, applies what the
+provider says and reports what it did. A call that the provider still
+reports as waiting more than `CALLORA_VOICE_SCHEDULED_CALL_TIMEOUT_SECONDS`
+after it was due is closed as `failed` by the timeout policy (set
+`CALLORA_VOICE_STUCK_CALL_TIMEOUT_ACTION=keep_polling` to keep polling
+instead).
+
+The worker does the same thing on its own, every
+`CALLORA_VOICE_STATUS_SYNC_INTERVAL_SECONDS` — check that the worker is
+running:
+
+```bash
+docker compose logs -f worker
+```
+
 ### Finding out why a call was blocked
 
 ```bash
@@ -890,6 +1133,14 @@ pass through (and the degradation is logged). To change the limit, set
   HMAC scheme for execution webhooks; `CALLORA_BOLNA_WEBHOOK_SECRET` adds
   one, and without it the endpoint cannot verify the caller
   cryptographically.
+* **The webhook URL lives on the Bolna agent, not in Callora.** An agent
+  without one pushes nothing, and the call only moves through the
+  reconciliation sweep — which polls the provider, but only every
+  `CALLORA_VOICE_STATUS_SYNC_INTERVAL_SECONDS`, and only for the calls that
+  are due.
+* **The sweep can only see what the provider still knows.** A call whose
+  execution Bolna has forgotten is closed as `failed`; a call the provider
+  cannot answer for is left untouched and retried on the next sweep.
 * **The external DND lookup is an interface, not an implementation.** The
   local registry is authoritative; plug in a national-registry adapter
   through `ComplianceGate(dnd_lookup=...)` to add a remote source. A

@@ -77,7 +77,6 @@ class BusinessProfile(VoiceModel):
     require_consent: bool
     dnd_enabled: bool
     bolna_agent_id: Optional[str] = None
-    bolna_from_number: Optional[str] = None
     agent_instructions: Optional[str] = None
     qualification_questions: List[Dict[str, Any]] = Field(default_factory=list)
     warm_transfer_enabled: bool
@@ -92,6 +91,13 @@ class BusinessProfile(VoiceModel):
     )
     provider_configured: bool = Field(
         description="Whether the voice provider credentials are present."
+    )
+    call_quotas_disabled: bool = Field(
+        default=False,
+        description=(
+            "Whether the daily per-lead and per-business call quotas are "
+            "skipped. Only ever true in a development environment."
+        ),
     )
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
@@ -113,7 +119,6 @@ class BusinessProfileUpdate(VoiceModel):
     require_consent: Optional[bool] = None
     dnd_enabled: Optional[bool] = None
     bolna_agent_id: Optional[str] = Field(default=None, max_length=128)
-    bolna_from_number: Optional[str] = Field(default=None, max_length=32)
     agent_instructions: Optional[str] = None
     qualification_questions: Optional[List[Dict[str, Any]]] = None
     warm_transfer_enabled: Optional[bool] = None
@@ -522,6 +527,29 @@ class VoiceStatsResponse(VoiceModel):
     jobs_failed: int
     total_cost: float = 0.0
     currency: str = "INR"
+
+
+class StatusSyncResponse(VoiceModel):
+    """The result of one reconciliation sweep.
+
+    ``outcomes`` describes what happened to every call that was checked:
+    ``applied`` (the provider moved the call forward), ``unchanged`` (the
+    provider agrees with Callora), ``out_of_order`` (the provider reported
+    an older status), ``unknown_provider_status`` (the provider reported a
+    status Callora does not know — the call was left alone),
+    ``provider_unreachable`` / ``provider_error`` (the provider could not be
+    asked — the call was left alone), ``execution_missing`` (the provider
+    does not know the execution any more) and ``timeout`` (the documented
+    timeout policy closed the call).
+    """
+
+    business_id: str
+    checked: int = 0
+    applied: int = 0
+    unchanged: int = 0
+    skipped: int = 0
+    failed: int = 0
+    outcomes: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class WebhookAck(BaseModel):

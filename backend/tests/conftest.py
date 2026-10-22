@@ -126,7 +126,12 @@ def voice_settings(settings, monkeypatch):
     monkeypatch.setenv("CALLORA_VOICE_LLM_PROVIDER", "null")
     # The duplicate-call cooldown has its own test; elsewhere it would
     # mask the rule under test.
-    monkeypatch.setenv("CALLORA_VOICE_DUPLICATE_CALL_COOLDOWN_MINUTES", "0")
+    monkeypatch.setenv("CALLORA_VOICE_DUPLICATE_CALL_COOLDOWN_SECONDS", "0")
+    # The compliance gate is exercised with the production policy: the
+    # development-only overrides stay off unless a test asks for them, so
+    # a developer's local environment can never change the outcome.
+    monkeypatch.setenv("CALLORA_ENVIRONMENT", "production")
+    monkeypatch.setenv("CALLORA_DISABLE_CALL_QUOTAS", "false")
     get_settings.cache_clear()
     return get_settings()
 
@@ -151,7 +156,6 @@ def voice_business(db, voice_settings):
         require_consent=True,
         dnd_enabled=True,
         bolna_agent_id="agent_test",
-        bolna_from_number="+911800000000",
         agent_instructions="You are a sales agent for Test Realty.",
         qualification_questions=[
             {"key": "budget", "question": "What is your budget?", "type": "text"},

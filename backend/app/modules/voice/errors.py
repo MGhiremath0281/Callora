@@ -117,6 +117,23 @@ class ProviderError(VoiceError):
     status_code = 502
     code = "voice_provider_error"
 
+    def __init__(self, message: str, provider_status_code: Optional[int] = None):
+        super().__init__(message)
+        #: The HTTP status the provider answered with, when there was one.
+        self.provider_status_code = provider_status_code
+
+
+class ProviderExecutionNotFoundError(ProviderError):
+    """The provider does not know this execution (any more).
+
+    This is a *confirmation*, not a timeout: the provider answered and
+    said the execution does not exist, so the call can never happen and
+    the call may be closed as failed.
+    """
+
+    status_code = 502
+    code = "voice_provider_execution_not_found"
+
 
 class ProviderTimeoutError(VoiceError):
     status_code = 504

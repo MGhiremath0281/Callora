@@ -8,16 +8,27 @@ production without code changes.
 from functools import lru_cache
 import os
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.logging_config import get_logger
 
 #: ``backend/`` — the directory that holds the application package.
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 #: The repository root — the directory that holds ``docker-compose.yml`` and
 #: the shared ``.env`` file.
 _REPO_ROOT = _BACKEND_DIR.parent
+
+logger = get_logger("callora.config")
+
+#: Environment names that unlock the development-only overrides. Every other
+#: value — including an unknown or misspelled one — is treated as production,
+#: so a typo can never relax a compliance rule.
+DEVELOPMENT_ENVIRONMENTS = frozenset(
+    {"local", "development", "dev", "test", "testing"}
+)
 
 
 def _dotenv_files() -> tuple[str, ...]:
@@ -51,6 +62,13 @@ class Settings(BaseSettings):
     # Comma separated mapping of "business_id:api_key". Example:
     # "biz_001:secret1,biz_002:secret2"
     api_keys: str = "biz_001:dev-key-biz-001"
+
+    # --- Deployment environment -----------------------------------------
+    # Which environment this process runs in. "production" is the default
+    # and the only environment in which every compliance rule is
+    # unconditionally enforced. The development-only overrides below are
+    # honoured *only* when this names an explicit development environment.
+    environment: str = "production"
 
     # --- Import limits --------------------------------------------------
     max_upload_size_mb: int = Field(default=10, ge=1, le=100)
@@ -271,11 +289,37 @@ class Settings(BaseSettings):
     bolna_webhook_secret: Optional[str] = None
     # Fallback agent id used when a business does not configure its own.
     bolna_default_agent_id: Optional[str] = None
-    # Fallback caller id (E.164) used when a business does not configure one.
+    # Deprecated — no longer used. The caller number of an outbound call
+    # is never defaulted: it is either carried by the request or absent,
+    # and an absent one is left out of the Bolna request so Bolna places
+    # the call through the telephony provider of the agent. The setting is
+    # kept (optional, blank means "not configured") so an existing
+    # deployment still starts and still places calls; it is ignored.
     bolna_default_from_number: Optional[str] = None
     # Default per-call timeouts used by the provider adapter.
     voice_provider_max_attempts: int = Field(default=3, ge=1, le=10)
     voice_provider_retry_backoff_seconds: float = Field(default=1.0, ge=0.0, le=60.0)
+
+    # --- Provider status reconciliation ----------------------------------
+    # The provider webhook is the fast path. The reconciliation sweep is
+    # the safety net for the webhooks that never arrive (no webhook_url
+    # on the agent, a dropped request, a rejected payload): it polls the
+    # provider for the status of the calls Callora knows about.
+    # How often a single call may be checked with the provider.
+    voice_status_poll_interval_seconds: int = Field(default=60, ge=0, le=3_600)
+    # How often the background worker runs the sweep. 0 disables it.
+    voice_status_sync_interval_seconds: int = Field(default=60, ge=0, le=3_600)
+    # How many calls are checked in one sweep.
+    voice_status_sync_max_calls_per_sweep: int = Field(default=50, ge=1, le=1_000)
+    # How long a call may stay in a pre-dial state (scheduled / queued)
+    # before the timeout policy applies. The provider is always asked
+    # first: the call is only closed when the provider confirms that it
+    # is still waiting and the call was due long enough ago. A call that
+    # is talking to somebody is never closed this way.
+    voice_scheduled_call_timeout_seconds: int = Field(default=900, ge=0, le=86_400)
+    # What the timeout policy does: "fail" closes the call as failed,
+    # "keep_polling" only reports it and leaves it in place.
+    voice_stuck_call_timeout_action: str = "fail"
 
     # --- Outbound calling policy defaults --------------------------------
     # IANA timezone used to evaluate the permitted calling window.
@@ -287,10 +331,31 @@ class Settings(BaseSettings):
     voice_max_calls_per_lead_per_day: int = Field(default=1, ge=1, le=50)
     # Maximum number of outbound calls placed per business per calendar day.
     voice_max_calls_per_business_per_day: int = Field(default=500, ge=1, le=100_000)
+    # Development-only: skip the daily per-lead and per-business call
+    # quotas so a local integration can be exercised repeatedly. The
+    # override needs two explicit opt-ins — this flag *and* a development
+    # ``environment`` — and it relaxes nothing else: consent, DND, the
+    # calling window, the duplicate-call protection, the concurrency cap
+    # and the provider check all stay in force. Outside a development
+    # environment the flag is ignored (see ``call_quotas_disabled``).
+    disable_call_quotas: bool = False
     # Maximum number of calls in flight for one business at the same time.
     voice_max_concurrent_calls: int = Field(default=5, ge=1, le=1_000)
     # Minimum gap between two calls to the same lead (anti-duplicate rule).
-    voice_duplicate_call_cooldown_minutes: int = Field(default=60, ge=0, le=10_080)
+    #
+    # The value is expressed in *seconds* so a short local-development
+    # cooldown (60 seconds) can be configured without a code change, while
+    # the production default stays at 60 minutes (3600 seconds). ``0``
+    # disables the cooldown — the in-flight guard (a call that Bolna still
+    # reports as queued, ringing or active) always stays in force.
+    voice_duplicate_call_cooldown_seconds: int = Field(default=3600, ge=0, le=604_800)
+    # Deprecated: the former minute-based variable. It is still honoured —
+    # converted to seconds — when the seconds variable above is not set, so
+    # an existing deployment keeps its behaviour. A legacy ``60`` still means
+    # 60 minutes and never 60 seconds.
+    voice_duplicate_call_cooldown_minutes: Optional[int] = Field(
+        default=None, ge=0, le=10_080
+    )
     # Languages the voice pipeline is configured for. Used to validate
     # per-call language selection (Hindi / Kannada / English).
     voice_supported_languages: str = "en,hi,kn"
@@ -335,6 +400,32 @@ class Settings(BaseSettings):
             )
         return cleaned
 
+    @field_validator("bolna_default_from_number", mode="before")
+    @classmethod
+    def _normalize_bolna_default_from_number(cls, v: Any) -> Optional[str]:
+        """Treat a blank caller number as "not configured".
+
+        The value is deprecated and never used to fill in a caller number,
+        but it stays optional: an unset, empty or whitespace-only value
+        must never keep the application from starting.
+        """
+        if v is None:
+            return None
+        text = str(v).strip()
+        return text or None
+
+    @field_validator("voice_stuck_call_timeout_action", mode="before")
+    @classmethod
+    def _validate_stuck_call_timeout_action(cls, v: Any) -> str:
+        """Only the two documented timeout policies are accepted."""
+        text = str(v or "").strip().lower()
+        if text not in ("fail", "keep_polling"):
+            raise ValueError(
+                "voice_stuck_call_timeout_action must be 'fail' or "
+                f"'keep_polling', got {v!r}"
+            )
+        return text
+
     @property
     def api_key_map(self) -> Dict[str, str]:
         """Parse ``api_keys`` into ``{business_id: api_key}``."""
@@ -360,7 +451,81 @@ class Settings(BaseSettings):
     def voice_supported_language_set(self) -> set[str]:
         return {s.strip().lower() for s in self.voice_supported_languages.split(",") if s.strip()}
 
+    @property
+    def duplicate_call_cooldown_seconds(self) -> int:
+        """The effective duplicate-call cooldown, in seconds.
+
+        The canonical variable is
+        ``CALLORA_VOICE_DUPLICATE_CALL_COOLDOWN_SECONDS`` (default 3600
+        seconds = 60 minutes). The deprecated minute-based variable is only
+        consulted when the canonical one is absent, and it is converted to
+        seconds, so a legacy ``60`` keeps meaning 60 minutes.
+
+        ``0`` disables the cooldown. It never disables the in-flight guard:
+        a call that the provider still reports as queued, ringing or active
+        always blocks a second call to the same lead.
+        """
+        if "voice_duplicate_call_cooldown_seconds" in self.model_fields_set:
+            return self.voice_duplicate_call_cooldown_seconds
+        if self.voice_duplicate_call_cooldown_minutes is not None:
+            return self.voice_duplicate_call_cooldown_minutes * 60
+        return self.voice_duplicate_call_cooldown_seconds
+
+    @property
+    def is_development(self) -> bool:
+        """True only for an explicitly named development environment.
+
+        Anything else — "production", an empty value or a typo — is
+        treated as production, so an unrecognised name can never unlock a
+        development-only override.
+        """
+        return self.environment.strip().lower() in DEVELOPMENT_ENVIRONMENTS
+
+    @property
+    def call_quotas_disabled(self) -> bool:
+        """Whether the daily call quotas may be skipped.
+
+        The override needs two explicit opt-ins:
+
+        * ``CALLORA_DISABLE_CALL_QUOTAS=true`` — the request itself, and
+        * ``CALLORA_ENVIRONMENT`` naming a development environment.
+
+        Outside such an environment the flag is ignored and reported, so a
+        deployment that only sets the flag cannot silently drop the daily
+        quotas in production.
+        """
+        if not self.disable_call_quotas:
+            return False
+        if not self.is_development:
+            logger.warning(
+                "call_quota_override_refused",
+                extra={
+                    "environment": self.environment,
+                    "detail": (
+                        "the daily call quotas stay enforced outside a "
+                        "development environment"
+                    ),
+                },
+            )
+            return False
+        return True
+
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    settings = Settings()
+    if settings.bolna_default_from_number:
+        # The variable is ignored: the caller number of a call comes from
+        # the request or not at all. Say so once, so an operator does not
+        # keep a setting that looks effective and is not.
+        logger.warning(
+            "bolna_default_from_number_ignored",
+            extra={
+                "detail": (
+                    "CALLORA_BOLNA_DEFAULT_FROM_NUMBER is deprecated and "
+                    "ignored; the caller number of a call is taken from the "
+                    "request only"
+                ),
+            },
+        )
+    return settings

@@ -1,13 +1,17 @@
 """Webhook intake.
 
-Provider webhooks are the only way the system learns what happened during
-a call, so this service has to be exactly right:
+Provider webhooks are the fast path: the provider pushes an event
+whenever the status of a call changes. They are not the only path — the
+reconciliation sweep (``voice/sync.py``) polls the provider for the
+calls that never reported — so this service has to be exactly right:
 
 * **verify** the signature when the provider supports one;
 * **deduplicate** — a retried delivery must not create a second record or
   a second background job;
 * **tolerate reordering** — Bolna sends ``call-disconnected`` right before
   ``completed``; a late event may never move a call backwards;
+* **never terminate a call on an unknown status** — a status Callora has
+  never seen says nothing about whether the call is over;
 * **persist before acknowledging** — the event row is committed with the
   call update, so a crash after the 200 response can never lose data;
 * **stay fast** — the heavy post-call analysis is queued, not executed
@@ -16,7 +20,6 @@ a call, so this service has to be exactly right:
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any, Dict, Mapping, Optional
 
 from sqlalchemy.orm import Session
@@ -24,13 +27,15 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.modules.voice import repository as repo
 from app.modules.voice.constants import (
-    STATUS_RANK,
     TERMINAL_STATUSES,
     AuditAction,
-    JobType,
 )
 from app.modules.voice.errors import WebhookSignatureError
-from app.modules.voice.jobs import queue
+from app.modules.voice.lifecycle import (
+    SOURCE_WEBHOOK,
+    apply_status,
+    queue_postcall,
+)
 from app.modules.voice.models import CallEvent
 from app.modules.voice.providers.base import VoiceProvider
 
@@ -116,6 +121,16 @@ class WebhookService:
                 metadata={"event_key": event.event_key},
             )
             self._session.commit()
+            logger.info(
+                "webhook_execution_duplicate",
+                extra={
+                    "call_id": stored.call_id if stored else None,
+                    "provider_call_id": event.execution_id,
+                    "execution_id": event.execution_id,
+                    "provider_status": event.status,
+                    "event_id": stored.id if stored else None,
+                },
+            )
             return WebhookResult(
                 status=RESULT_DUPLICATE,
                 call_id=(stored.call_id if stored else None),
@@ -143,6 +158,16 @@ class WebhookService:
                 metadata={"event_key": event.event_key, "execution_id": event.execution_id},
             )
             self._session.commit()
+            logger.warning(
+                "webhook_execution_unmatched",
+                extra={
+                    "call_id": None,
+                    "provider_call_id": event.execution_id,
+                    "execution_id": event.execution_id,
+                    "provider_status": event.status,
+                    "event_id": stored.id,
+                },
+            )
             return WebhookResult(
                 status=RESULT_UNMATCHED,
                 event_id=stored.id,
@@ -154,7 +179,20 @@ class WebhookService:
         stored.call_id = call.id
 
         internal_status = self._provider.to_internal_status(event.status)
-        applied = self._apply_status(call, internal_status, event.payload)
+        update = apply_status(
+            self._session,
+            call,
+            internal_status,
+            event.payload,
+            source=SOURCE_WEBHOOK,
+            raw_status=event.status,
+        )
+        applied = {
+            "applied": update.applied,
+            "error": update.reason_code,
+            "reason_code": update.reason_code,
+            "detail": update.detail,
+        }
 
         stored.processed = applied["applied"]
         stored.processing_error = applied["error"]
@@ -172,6 +210,8 @@ class WebhookService:
             ),
             metadata={
                 "call_id": call.id,
+                "provider_call_id": call.provider_call_id,
+                "execution_id": call.provider_call_id,
                 "provider_status": event.status,
                 "call_status": call.status,
             },
@@ -179,22 +219,22 @@ class WebhookService:
 
         job_id = None
         if applied["applied"] and call.status in TERMINAL_STATUSES:
-            job, _created = queue.enqueue(
-                self._session,
-                JobType.POSTCALL_PROCESS,
-                payload={
-                    "call_id": call.id,
-                    "business_id": call.business_id,
-                    "status": call.status,
-                },
-                dedupe_key=queue.postcall_dedupe_key(call.id, call.status),
-                max_attempts=self._settings.voice_job_max_attempts,
-                business_id=call.business_id,
-            )
-            if job is not None:
-                job_id = job.id
+            job_id = queue_postcall(self._session, self._settings, call)
 
         self._session.commit()
+        logger.info(
+            "webhook_execution_processed",
+            extra={
+                "call_id": call.id,
+                "provider_call_id": call.provider_call_id,
+                "execution_id": call.provider_call_id,
+                "provider_status": event.status,
+                "call_status": call.status,
+                "applied": applied["applied"],
+                "reason_code": applied.get("reason_code"),
+                "event_id": stored.id,
+            },
+        )
         return WebhookResult(
             status=RESULT_PROCESSED if applied["applied"] else RESULT_IGNORED,
             call_id=call.id,
@@ -265,71 +305,3 @@ class WebhookService:
                 "the webhook signature could not be verified"
             )
         return result
-
-    def _apply_status(
-        self, call, internal_status: str, payload: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Move the call forward, never backwards."""
-        current = call.status
-        current_rank = STATUS_RANK.get(current, 0)
-        new_rank = STATUS_RANK.get(internal_status, 0)
-
-        values: Dict[str, Any] = {}
-        if current in TERMINAL_STATUSES and internal_status != current:
-            return {
-                "applied": False,
-                "error": "out_of_order",
-                "reason_code": "out_of_order",
-                "detail": (
-                    f"the call is already '{current}'; the '{internal_status}' event "
-                    "was ignored"
-                ),
-            }
-        if new_rank < current_rank:
-            return {
-                "applied": False,
-                "error": "out_of_order",
-                "reason_code": "out_of_order",
-                "detail": (
-                    f"the '{internal_status}' event is older than the current status "
-                    f"'{current}' and was ignored"
-                ),
-            }
-
-        values["status"] = internal_status
-        values["provider_payload"] = payload
-        transcript = payload.get("transcript")
-        if transcript:
-            values["transcript"] = transcript
-        summary = payload.get("summary")
-        if summary:
-            values["summary"] = summary
-        duration = payload.get("conversation_duration")
-        if duration is not None:
-            try:
-                values["duration_seconds"] = int(duration)
-            except (TypeError, ValueError):
-                pass
-        cost = payload.get("total_cost")
-        if cost is not None:
-            values["cost"] = cost
-        telephony = payload.get("telephony_data") or {}
-        if isinstance(telephony, dict):
-            recording = telephony.get("recording_url")
-            if recording:
-                values["recording_url"] = recording
-            if telephony.get("provider_call_id") and not call.provider_call_id:
-                values["provider_call_id"] = telephony["provider_call_id"]
-        error_message = payload.get("error_message")
-        if error_message:
-            values["error_message"] = str(error_message)
-        if internal_status in TERMINAL_STATUSES:
-            values["ended_at"] = datetime.now(timezone.utc)
-
-        repo.update_call(self._session, call, values)
-        return {
-            "applied": True,
-            "error": None,
-            "reason_code": None,
-            "detail": f"the call status is now '{internal_status}'",
-        }

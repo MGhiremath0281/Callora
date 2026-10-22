@@ -74,7 +74,6 @@ class Business(Base):
     dnd_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     # Bolna agent that runs the conversation for this business.
     bolna_agent_id: Mapped[Optional[str]] = mapped_column(String(128))
-    bolna_from_number: Mapped[Optional[str]] = mapped_column(String(32))
     # Free-form business instructions injected into the agent prompt.
     agent_instructions: Mapped[Optional[str]] = mapped_column(Text)
     # Business-defined qualification questions, e.g.
