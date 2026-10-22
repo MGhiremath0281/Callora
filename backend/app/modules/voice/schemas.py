@@ -20,9 +20,11 @@ from app.modules.voice.constants import (
     ConsentChannel,
     ConsentStatus,
     DndScope,
+    FollowUpAction,
     HandoffKind,
     HandoffStatus,
     JobStatus,
+    KnowledgeCategory,
     RefusalCategory,
 )
 
@@ -566,8 +568,97 @@ class WebhookAck(BaseModel):
     detail: Optional[str] = None
 
 
+# ---------------------------------------------------------------------------
+# Knowledge Base & Follow-Up Questions
+# ---------------------------------------------------------------------------
+
+
+class KnowledgeItemCreate(VoiceModel):
+    category: str = Field(default=KnowledgeCategory.FAQ, max_length=64)
+    title: str = Field(min_length=1, max_length=255)
+    content: str = Field(min_length=1)
+    tags: List[str] = Field(default_factory=list)
+    source_reference: str = Field(default="Verified Business Knowledge", max_length=255)
+    is_active: bool = True
+    priority: int = 0
+    extra_metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class KnowledgeItemUpdate(VoiceModel):
+    category: Optional[str] = Field(default=None, max_length=64)
+    title: Optional[str] = Field(default=None, max_length=255)
+    content: Optional[str] = None
+    tags: Optional[List[str]] = None
+    source_reference: Optional[str] = Field(default=None, max_length=255)
+    is_active: Optional[bool] = None
+    priority: Optional[int] = None
+    extra_metadata: Optional[Dict[str, Any]] = None
+
+
+class KnowledgeItemResponse(VoiceModel):
+    id: str
+    business_id: str
+    category: str
+    title: str
+    content: str
+    tags: List[str] = Field(default_factory=list)
+    source_reference: str
+    is_active: bool
+    priority: int
+    extra_metadata: Dict[str, Any] = Field(default_factory=dict)
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class KnowledgeItemListResponse(VoiceModel):
+    items: List[KnowledgeItemResponse] = Field(default_factory=list)
+    total: int = 0
+    business_id: str
+
+
+class KnowledgeItemBatchCreate(VoiceModel):
+    items: List[KnowledgeItemCreate] = Field(default_factory=list)
+
+
+class FollowUpQuestionRequest(BaseModel):
+    """Payload sent by Bolna (or test clients) when a follow-up question occurs."""
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    business_id: str = Field(min_length=1, max_length=64)
+    call_id: str = Field(min_length=1, max_length=64)
+    question: str = Field(min_length=1, max_length=1000)
+    language: Optional[str] = "en"
+    context: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+
+class FollowUpQuestionResponse(BaseModel):
+    """Answer and metadata returned to Bolna mid-conversation."""
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    answer: str
+    source_references: List[str] = Field(default_factory=list)
+    should_handoff: bool = False
+    handoff_recommended: bool = False
+    handoff_reason: Optional[str] = None
+    handoff_type: Optional[str] = None
+    handoff_id: Optional[str] = None
+    action: str = Field(default=FollowUpAction.ANSWER)
+    confidence: float = 1.0
+    qualification_continuation: Optional[str] = None
+    memory_state: Optional[Dict[str, Any]] = None
+
+
+class BolnaToolDefinitionResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    tool: Dict[str, Any]
+
+
 __all__ = [
     "AuditLogResponse",
+    "BolnaToolDefinitionResponse",
     "BusinessProfile",
     "BusinessProfileUpdate",
     "CallEventResponse",
@@ -583,9 +674,18 @@ __all__ = [
     "ConsentRecordResponse",
     "DndEntryCreate",
     "DndEntryResponse",
+    "FollowUpAction",
+    "FollowUpQuestionRequest",
+    "FollowUpQuestionResponse",
     "HandoffResponse",
     "HandoffUpdate",
     "JobResponse",
+    "KnowledgeCategory",
+    "KnowledgeItemBatchCreate",
+    "KnowledgeItemCreate",
+    "KnowledgeItemListResponse",
+    "KnowledgeItemResponse",
+    "KnowledgeItemUpdate",
     "QualificationQuestion",
     "VoiceLeadProfile",
     "VoiceLeadProfileUpdate",

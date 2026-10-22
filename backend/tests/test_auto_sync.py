@@ -132,17 +132,17 @@ class TestRouteRegistration:
         # Module 1-5: leads, imports, CRM, agent leads, recovery agent
         # and recovery dashboard.
         legacy_ops = {op for op in ops if not op[1].startswith("/api/v1/voice/")}
-        # Module 6: the outbound voice agent.
+        # Module 6: the outbound voice agent + knowledge base & follow-up Q&A.
         voice_ops = {op for op in ops if op[1].startswith("/api/v1/voice/")}
         assert len(legacy_ops) == 20, (
             f"Expected 20 non-voice operations, got {len(legacy_ops)}: "
             f"{sorted(legacy_ops)}"
         )
-        assert len(voice_ops) == 31, (
-            f"Expected 31 voice operations, got {len(voice_ops)}: "
+        assert len(voice_ops) == 39, (
+            f"Expected 39 voice operations, got {len(voice_ops)}: "
             f"{sorted(voice_ops)}"
         )
-        assert len(ops) == 51, f"Expected 51 operations, got {len(ops)}: {sorted(ops)}"
+        assert len(ops) == 59, f"Expected 59 operations, got {len(ops)}: {sorted(ops)}"
 
     def test_no_unversioned_leads_routes(self):
         """No unversioned /leads or /imports routes exist."""

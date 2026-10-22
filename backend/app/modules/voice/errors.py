@@ -187,3 +187,28 @@ class LLMUnavailableError(VoiceError):
 
     status_code = 503
     code = "llm_unavailable"
+
+
+class KnowledgeItemNotFoundError(VoiceError):
+    status_code = 404
+    code = "knowledge_item_not_found"
+
+    def __init__(self, item_id: str):
+        super().__init__(f"Knowledge item '{item_id}' was not found")
+        self.item_id = item_id
+
+
+class CrossBusinessAccessError(VoiceError):
+    status_code = 403
+    code = "cross_business_access_denied"
+
+    def __init__(self, message: str = "Access to resources belonging to another business is forbidden"):
+        super().__init__(message)
+
+
+class InvalidCallContextError(VoiceError):
+    status_code = 400
+    code = "invalid_call_context"
+
+    def __init__(self, message: str):
+        super().__init__(message)

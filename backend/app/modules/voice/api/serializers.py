@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from app.modules.voice.models import (
     AuditLog,
     Business,
+    BusinessKnowledgeItem,
     Call,
     CallEvent,
     CallOutcome,
@@ -262,6 +263,24 @@ def list_payload(items: List[Dict[str, Any]], business_id: str, limit: int, offs
     }
 
 
+def knowledge_item_payload(item: BusinessKnowledgeItem) -> Dict[str, Any]:
+    """Serialize one business knowledge item."""
+    return {
+        "id": item.id,
+        "business_id": item.business_id,
+        "category": item.category,
+        "title": item.title,
+        "content": item.content,
+        "tags": list(item.tags or []),
+        "source_reference": item.source_reference,
+        "is_active": item.is_active,
+        "priority": item.priority,
+        "extra_metadata": dict(item.extra_metadata or {}),
+        "created_at": item.created_at,
+        "updated_at": item.updated_at,
+    }
+
+
 __all__ = [
     "audit_log_payload",
     "business_payload",
@@ -273,5 +292,6 @@ __all__ = [
     "dnd_payload",
     "handoff_payload",
     "job_payload",
+    "knowledge_item_payload",
     "list_payload",
 ]
