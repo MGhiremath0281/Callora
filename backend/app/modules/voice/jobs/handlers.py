@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.modules.voice import repository as repo
+from app.modules.voice import sync
 from app.modules.voice.jobs import queue
 from app.modules.voice.postcall.graph import PostCallWorkflow
 from app.modules.voice.postcall.llm import build_llm_client
@@ -51,9 +52,34 @@ def handle_postcall(session: Session, job, settings: Settings) -> Dict[str, Any]
     }
 
 
+def handle_status_sync(session: Session, job, settings: Settings) -> Dict[str, Any]:
+    """Reconcile the status of the calls with the voice provider.
+
+    The provider webhook is the fast path; this job is the safety net
+    for the webhooks that never arrive. It asks the provider for the
+    status of the calls that are due for a check and applies the answer
+    with the shared state machine.
+    """
+    business_id = job.payload.get("business_id")
+    report = sync.sweep(session, settings, business_id=business_id)
+    session.commit()
+    logger.info(
+        "status_sync_swept",
+        extra={
+            "checked": report.checked,
+            "applied": report.applied,
+            "unchanged": report.unchanged,
+            "skipped": report.skipped,
+            "failed": report.failed,
+        },
+    )
+    return report.to_dict()
+
+
 #: type -> handler
 DEFAULT_HANDLERS = {
     "postcall.process": handle_postcall,
+    "status.sync": handle_status_sync,
 }
 
 

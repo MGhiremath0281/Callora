@@ -37,12 +37,14 @@ from app.modules.voice.constants import (
     CallStatus,
     ComplianceDecision,
     ReasonCode,
+    map_provider_status,
 )
 from app.modules.voice.errors import (
     ComplianceBlockedError,
     ProviderConnectionError,
     ProviderError,
 )
+from app.modules.voice.lifecycle import SOURCE_REFRESH, apply_status, queue_postcall
 from app.modules.voice.models import Business, Call, ComplianceDecision as ComplianceDecisionRow
 from app.modules.voice.phone import normalize_phone
 from app.modules.voice.providers.base import OutboundCallRequest, VoiceProvider
@@ -165,13 +167,20 @@ class CallOrchestrator:
             self._fail_call(call, request, str(exc))
             raise
 
+        # The provider accepted the call. A status Callora does not know
+        # says nothing about the call, so the safe assumption is that it
+        # is waiting in the dial queue.
+        status = result.status or CallStatus.QUEUED
+        if status == CallStatus.UNKNOWN:
+            status = CallStatus.QUEUED
+
         repo.update_call(
             self._session,
             call,
             {
                 "provider_call_id": result.execution_id,
                 "provider_agent_id": provider_request.agent_id,
-                "status": result.status or CallStatus.QUEUED,
+                "status": status,
                 "initiated_at": now,
                 "provider_payload": result.raw,
                 "error_message": None,
@@ -198,6 +207,9 @@ class CallOrchestrator:
             extra={
                 "call_id": call.id,
                 "provider_call_id": result.execution_id,
+                "execution_id": result.execution_id,
+                "call_status": call.status,
+                "provider": provider.name,
             },
         )
         return CallInitiationResult(
@@ -207,30 +219,30 @@ class CallOrchestrator:
     def refresh_status(
         self, call: Call, provider: Optional[VoiceProvider] = None
     ) -> Call:
-        """Pull the current state of a call from the provider."""
+        """Pull the current state of a call from the provider.
+
+        This is the recovery path for a webhook that never arrived. The
+        provider is asked for the authoritative status and the answer is
+        applied with the shared state machine, so a refresh can never move
+        a call backwards and a call that turns out to be over is queued
+        for the post-call analysis exactly like a webhook would have done.
+        """
         if not call.provider_call_id:
             return call
         provider = provider or self._provider or build_provider(settings=self._settings)
         result = provider.get_call(call.provider_call_id)
-        values: Dict[str, Any] = {
-            "status": result.status or call.status,
-            "provider_payload": result.raw,
-        }
-        if result.error_message:
-            values["error_message"] = result.error_message
-        duration = result.raw.get("conversation_duration")
-        if duration is not None:
-            values["duration_seconds"] = int(duration)
-        cost = result.raw.get("total_cost")
-        if cost is not None:
-            values["cost"] = cost
-        recording = (result.raw.get("telephony_data") or {}).get("recording_url")
-        if recording:
-            values["recording_url"] = recording
-        transcript = result.raw.get("transcript")
-        if transcript:
-            values["transcript"] = transcript
-        repo.update_call(self._session, call, values)
+        raw_status = (result.raw or {}).get("status")
+        internal_status = map_provider_status(result.status or raw_status or "")
+        update = apply_status(
+            self._session,
+            call,
+            internal_status,
+            result.raw,
+            source=SOURCE_REFRESH,
+            raw_status=raw_status,
+        )
+        if update.applied and update.changed:
+            queue_postcall(self._session, self._settings, call)
         return call
 
     # -- internals ---------------------------------------------------------
@@ -330,9 +342,7 @@ class CallOrchestrator:
                 provider=(self._provider.name if self._provider else "bolna"),
                 status=CallStatus.PENDING,
                 to_number=normalize_phone(lead.phone) if lead is not None else None,
-                from_number=request.from_number
-                or (business.bolna_from_number if business else None)
-                or self._settings.bolna_default_from_number,
+                from_number=self._resolve_from_number(request),
                 language=self._resolve_language(request, business, lead),
                 scheduled_at=request.scheduled_at,
                 compliance_decision_id=decision_id,
@@ -407,6 +417,24 @@ class CallOrchestrator:
         )
         self._session.commit()
 
+    def _resolve_from_number(self, request: CallRequest) -> Optional[str]:
+        """Resolve the caller number of one call.
+
+        The caller number is optional and is **never** defaulted. Only the
+        number the request itself carries is used; it is normalised to
+        E.164 — the format Bolna requires.
+
+        When the request carries no number the result is ``None``: the
+        provider request then has no caller-number field at all and Bolna
+        places the call through the telephony provider of the agent.
+
+        There is deliberately no deployment-wide or business-wide fallback.
+        A number that the provider account does not know (``Calling
+        from_number ... doesn't exist for <provider>``) would fail every
+        call, so it must never be injected behind the caller's back.
+        """
+        return normalize_phone(request.from_number)
+
     def _resolve_language(
         self, request: CallRequest, business: Optional[Business], lead
     ) -> Optional[str]:
@@ -439,9 +467,7 @@ class CallOrchestrator:
         return OutboundCallRequest(
             to_number=normalize_phone(lead.phone) if lead is not None else "",
             agent_id=agent_id,
-            from_number=request.from_number
-            or (business.bolna_from_number if business else None)
-            or self._settings.bolna_default_from_number,
+            from_number=self._resolve_from_number(request),
             language=language,
             user_data=user_data,
             scheduled_at=request.scheduled_at,
