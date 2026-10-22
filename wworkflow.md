@@ -1104,7 +1104,8 @@ POST /api/v1/voice/calls
       ▼
   call row created ──▶ provider contacted ──▶ status "simulated" (or a real provider id)
       │
-      │  webhook (Bolna execution events)
+      │  webhook (Bolna execution events)  ──▶ the fast path
+      │  reconciliation sweep (poll the provider) ──▶ the safety net
       ▼
   dedupe + ordering ──▶ voice_jobs ──▶ worker ──▶ LangGraph post-call workflow
                                                     └▶ call_outcomes + handoffs
@@ -1142,10 +1143,11 @@ POST /api/v1/voice/calls
 | POST | `/api/v1/voice/ops/jobs/{job_id}/retry` | Re-queue a dead job (audited) |
 | GET | `/api/v1/voice/ops/audit` | Read the audit trail |
 | GET | `/api/v1/voice/ops/compliance-decisions` | Read the persisted compliance decisions |
+| POST | `/api/v1/voice/ops/sync-calls` | Reconcile the calls with the provider (manual version of the background sweep) |
 | POST | `/api/v1/voice/webhooks/bolna/execution` | **Provider webhook** — call lifecycle events (no `X-API-Key`) |
 | POST | `/api/v1/voice/webhooks/bolna/pre-transfer` | **Provider webhook** — warm-transfer events (no `X-API-Key`) |
 
-24 paths, 30 operations. Everything except the two webhooks requires
+25 paths, 31 operations. Everything except the two webhooks requires
 `X-API-Key` and is business-scoped — another tenant gets `404`, never
 another tenant's data.
 
@@ -1164,6 +1166,10 @@ export CALLORA_BOLNA_DEFAULT_FROM_NUMBER=
 export CALLORA_VOICE_ENABLE_OUTBOUND_CALLS=false          # master switch
 export CALLORA_VOICE_LLM_PROVIDER=groq                   # or "null" for no model
 export GROQ_API_KEY=
+export CALLORA_VOICE_STATUS_POLL_INTERVAL_SECONDS=60      # per-call provider poll
+export CALLORA_VOICE_STATUS_SYNC_INTERVAL_SECONDS=60      # worker sweep cadence
+export CALLORA_VOICE_SCHEDULED_CALL_TIMEOUT_SECONDS=900  # stuck pre-dial timeout
+export CALLORA_VOICE_STUCK_CALL_TIMEOUT_ACTION=fail       # or "keep_polling"
 ```
 
 Docker Compose gained two services: `redis` (host port `6380` — `6379` was
@@ -1372,7 +1378,9 @@ curl -s -X POST $BASE/api/v1/voice/webhooks/bolna/execution \
 
 Send the **same** payload again → `{"status":"duplicate"}` (the provider must
 not retry it). Send an **earlier** status → `{"status":"ignored_out_of_order"}`
-(the event is stored, the call never moves backwards). An event that matches
+(the event is stored, the call never moves backwards). A status Callora does
+not know → the call keeps its status (it is never terminated by an unknown
+status) and the event is stored as not processed. An event that matches
 no known call → `{"status":"unmatched"}`.
 
 The body is parsed and stored **before** the `200` response, so a crash after
@@ -1382,6 +1390,19 @@ If `CALLORA_BOLNA_WEBHOOK_SECRET` is set, the raw body must carry an
 HMAC-SHA256 signature in `x-bolna-signature` (or `x-webhook-signature`,
 `x-hub-signature-256`, `x-signature`) — otherwise the event is rejected with
 `401 webhook_signature_invalid` and the rejection is audited.
+
+The webhook is the **fast path** only. A Bolna agent without a `webhook_url`
+pushes nothing, so the call would sit in `scheduled` for good. The worker
+therefore also runs a **reconciliation sweep** (every
+`CALLORA_VOICE_STATUS_SYNC_INTERVAL_SECONDS`) that polls the provider for the
+calls it has not heard about, and `POST /api/v1/voice/ops/sync-calls` runs
+the same sweep on demand. Both use one shared state machine: a call never
+moves backwards, a terminal status is never overwritten, an unknown status
+never terminates a call, and a call that never got past the dial queue
+(`pending` / `scheduled` / `queued`) and that the provider still reports as
+waiting after `CALLORA_VOICE_SCHEDULED_CALL_TIMEOUT_SECONDS` is closed as
+`failed`. A call that is talking to somebody is never closed because time
+passed — only the provider can end it.
 
 ### Step 8 — Run the worker and read the outcome
 
@@ -1488,12 +1509,15 @@ never authoritative for any of it.
 
 ### Tests added
 
-- `tests/test_voice_compliance.py` (39) — every mandatory check in isolation, fail-closed behaviour, DND, consent, calling window, quotas, concurrency, duplicate-call rules, and `provider_ready` in simulated vs. placed mode.
+- `tests/test_voice_compliance.py` (59) — every mandatory check in isolation, fail-closed behaviour, DND, consent, calling window, quotas, concurrency, duplicate-call rules, and `provider_ready` in simulated vs. placed mode.
+- `tests/test_voice_cooldown.py` (24) — the configurable duplicate-call cooldown: the production default of 60 minutes, `CALLORA_VOICE_DUPLICATE_CALL_COOLDOWN_SECONDS`, the deprecated minute-based variable, the enforced window, and the in-flight guard that stays mandatory whatever the cooldown is.
 - `tests/test_voice_orchestrator.py` (29) — simulated / blocked / provider paths, retry semantics, the audit trail, `refresh_status`, provider credentials.
-- `tests/test_voice_webhooks.py` (23) — applying events, dedupe, out-of-order delivery, the post-call job, signature verification, the pre-transfer event.
+- `tests/test_voice_webhooks.py` (31) — applying events, dedupe, out-of-order delivery, unknown statuses, the post-call job, the duplicate-call guard, signature verification, the pre-transfer event.
+- `tests/test_voice_status_sync.py` (41) — the reconciliation sweep: queued / successful / failed calls, a stale scheduled call, the timeout policy, an unreachable provider, an unknown provider status, out-of-order events, the in-flight guard, the worker and the operator endpoint.
 - `tests/test_voice_jobs.py` (23) — enqueue, dedupe key, atomic claim, retries, backoff, dead jobs, stale release, the worker.
 - `tests/test_voice_postcall.py` (15) — the LangGraph workflow, qualification, refusals, handoff creation, the degradation path.
-- `tests/test_voice_api.py` (73) — authentication, call initiation, idempotency, the 409 conflict, the rate limit, the webhook endpoints, the handoffs, the ops endpoints, the business configuration, consent and DND.
+- `tests/test_voice_api.py` (79) — authentication, call initiation, idempotency, the 409 conflict, the rate limit, the webhook endpoints, the handoffs, the ops endpoints, the business configuration, consent and DND.
+- `tests/test_voice_bolna_provider.py` (22) — the Bolna adapter: the request shape, the execution id, the caller number, the error mapping.
 
 The suite is offline by construction: the provider is a `FakeProvider`, the
 model is a `ScriptedLLM`, and outbound calling is switched off in the fixture.
@@ -1558,6 +1582,7 @@ GET  /api/v1/voice/ops/jobs
 GET  /api/v1/voice/ops/jobs/{job_id}
 POST /api/v1/voice/ops/jobs/{job_id}/retry
 GET  /api/v1/voice/ops/stats
+POST /api/v1/voice/ops/sync-calls
 POST /api/v1/voice/webhooks/bolna/execution
 POST /api/v1/voice/webhooks/bolna/pre-transfer
 ```
@@ -1567,7 +1592,8 @@ POST /api/v1/voice/webhooks/bolna/pre-transfer
 - Database: `recovery_outreach_content`, `recovery_outreach_events` (migration `0005_recovery_outreach`).
 - Outreach generation hardened: verified-vs-missing field separation, CRM/contact evidence gating, grounding-violation rejection, full schema validation, quick-copy alignment, configurable agent identity, alias-aware language resolution with configurable fallback, natural gender-neutral Devanagari Hindi templates, preferred-vs-alternative channel plan.
 - OpenAPI hygiene: the recovery-dashboard routes that shadow the recovery-agent routes now carry unique operation ids (`dashboard_list_recovery_cases`, `dashboard_get_recovery_case`) — the document no longer contains duplicate operation ids, so client generators can consume it.
-- Module 6 (Outbound Voice Agent) routes added: 24 paths / 30 operations under `/api/v1/voice` — business config, voice lead profiles, consent, DND registry, call initiation + list/get/events/outcome/refresh/cancel/postcall, handoffs, ops (stats/jobs/audit/compliance-decisions) and the two Bolna webhooks. Every call goes through a **fail-closed, nine-check compliance gate**; every decision is persisted and auditable; call initiation is idempotent; webhooks are deduplicated and never move a call backwards.
+- Module 6 (Outbound Voice Agent) routes added: 25 paths / 31 operations under `/api/v1/voice` — business config, voice lead profiles, consent, DND registry, call initiation + list/get/events/outcome/refresh/cancel/postcall, handoffs, ops (stats/jobs/audit/compliance-decisions/sync-calls) and the two Bolna webhooks. Every call goes through a **fail-closed, nine-check compliance gate**; every decision is persisted and auditable; call initiation is idempotent; webhooks are deduplicated and never move a call backwards.
+- Call status synchronization: the webhook is the fast path, a **reconciliation sweep** (worker + `POST /api/v1/voice/ops/sync-calls`) is the safety net, and both share one state machine (`voice/lifecycle.py`). A call never moves backwards, a terminal status is never overwritten, an unknown provider status never terminates a call, and only a call that never got past the dial queue (`pending` / `scheduled` / `queued`) can be failed by the documented timeout — and only after the provider confirms it is still waiting.
 - Database: 11 new `voice_*` tables + `idempotency_keys.payload_hash` (migration `0006_voice_agent`).
 - Post-call intelligence: LangGraph workflow (`load_context → extract_qualification → classify_refusal → summarize → build_handoff → persist`) producing a summary, qualification result, refusal category, follow-up actions and a human handoff briefing; degrades to the provider payload when no LLM is configured.
 - Background work runs on a **durable PostgreSQL job queue** (atomic claim, `skip_locked`, exponential backoff, dead-letter + manual retry), drained by `python -m app.modules.voice.jobs.worker`.

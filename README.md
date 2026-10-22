@@ -67,6 +67,12 @@ cd backend
 python -m app.modules.voice.jobs.worker
 ```
 
+The worker also runs the **call status reconciliation sweep**: it polls the
+voice provider for the calls the provider never reported on, so a call can
+never stay in `scheduled` because a webhook was lost. It runs every
+`CALLORA_VOICE_STATUS_SYNC_INTERVAL_SECONDS` (and on demand through
+`POST /api/v1/voice/ops/sync-calls`).
+
 Redis is optional — set `CALLORA_REDIS_ENABLED=false` and every Redis-backed
 feature (rate limiting, caching) degrades to a no-op instead of failing.
 
@@ -87,7 +93,12 @@ required to boot the service.
 | `CALLORA_BOLNA_API_KEY` | *(unset)* | Bolna API key. Only needed for calls that are actually placed — a simulated call skips the check. |
 | `CALLORA_REDIS_URL` | `redis://localhost:6379/0` | Connection URL for the accelerator. |
 | `CALLORA_VOICE_LLM_PROVIDER` | `groq` | `groq`, `langchain`, or `null` (no model). |
+| `CALLORA_VOICE_STATUS_SYNC_INTERVAL_SECONDS` | `60` | How often the worker reconciles the call statuses with the provider. `0` disables it. |
+| `CALLORA_VOICE_SCHEDULED_CALL_TIMEOUT_SECONDS` | `900` | How long a call may stay in a pre-dial state before the timeout policy applies (the provider is asked first). |
 | `GROQ_API_KEY` | *(unset)* | Key for the Groq client. |
+| `CALLORA_ENVIRONMENT` | `production` | Deployment marker. Only `local`/`development`/`dev`/`test`/`testing` unlock the development-only overrides; anything else is treated as production. |
+| `CALLORA_DISABLE_CALL_QUOTAS` | `false` | **Development only.** Skips the daily per-lead and per-business call quotas so an integration can be tested repeatedly. Honoured only together with a development `CALLORA_ENVIRONMENT`; everywhere else the quotas stay enforced. |
+| `CALLORA_VOICE_DUPLICATE_CALL_COOLDOWN_SECONDS` | `3600` | Minimum gap between two calls to the same lead, in seconds. `0` disables it. Lower it locally (e.g. `60`) to repeat a test call quickly; the in-flight guard is never affected. |
 
 The complete reference — every voice, Bolna, Redis and LLM variable — lives
 in [`docs/voice-agent.md`](docs/voice-agent.md#3-configuration-reference).
@@ -104,6 +115,7 @@ cp .env.example .env     # Windows: copy .env.example .env
 ```ini
 CALLORA_BOLNA_API_KEY=<your key>
 CALLORA_BOLNA_DEFAULT_AGENT_ID=<agent id>
+# Optional — only when the agent must call from a specific number:
 CALLORA_BOLNA_DEFAULT_FROM_NUMBER=+91XXXXXXXXXX
 ```
 
