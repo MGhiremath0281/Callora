@@ -1,7 +1,7 @@
 
 Customer Name,Mobile Number,Lead Source,Property Type,Budget,City,Email,Preferred Language
 Rahul Sharma,9876543210,99acres,Apartment,7500000,Bengaluru,rahul.test@example.com,English
-Priya Patil,9876543211,MagicBricks,Villa,12500000,Pune,priya.test@example.com,Hindi
+Priya Patil,6363278880,MagicBricks,Villa,12500000,Pune,priya.test@example.com,Hindi
 Amit Kumar,9876543212,Website,Plot,3500000,Hyderabad,amit.test@example.com,English
 Sneha Reddy,9876543213,Facebook Ads,Apartment,6500000,Bengaluru,sneha.test@example.com,Telugu
 Arjun Desai,9876543214,Referral,Commercial,25000000,Mumbai,arjun.test@example.com,English
@@ -10,3 +10,4 @@ Kavya Rao,9876543215,Instagram,Villa,18000000,Mysuru,kavya.test@example.com,Kann
 Vikram Singh,INVALID,Website,Apartment,8500000,Bengaluru,vikram.test@example.com,English
 Neha Joshi,9876543216,MagicBricks,Plot,-500000,Pune,neha.test@example.com,Hindi
 Test Customer,9876543217,Website,Apartment,5500000,Bengaluru,invalid-email,English
+Nitish Kumar,6363278880,Manual Test,Real Estate,0,Bengaluru,user@example.com,English
