@@ -23,9 +23,11 @@ from typing import Any, Dict, Mapping, Optional
 import httpx
 
 from app.config import Settings
+from app.modules.voice.constants import CallStatus
 from app.modules.voice.errors import (
     ProviderConnectionError,
     ProviderError,
+    ProviderExecutionNotFoundError,
     ProviderNotConfiguredError,
     ProviderTimeoutError,
 )
@@ -48,6 +50,37 @@ SIGNATURE_HEADERS = (
     "x-hub-signature-256",
     "x-signature",
 )
+
+#: Keys that may carry the execution id, in the order they are trusted.
+#: Bolna uses ``execution_id`` in the ``POST /call`` answer and ``id`` in
+#: the execution document it pushes to the webhook.
+EXECUTION_ID_KEYS = ("execution_id", "id", "executionId", "call_id")
+
+#: Keys that may wrap the execution document in a larger payload.
+NESTED_PAYLOAD_KEYS = ("data", "execution", "payload", "body")
+
+
+def extract_execution_id(payload: Mapping[str, Any]) -> Optional[str]:
+    """Find the execution id in a Bolna document.
+
+    Bolna is not consistent about the field name: the ``POST /call``
+    answer carries ``execution_id`` while the execution document (the
+    answer of ``GET /executions/{id}`` and the webhook payload) carries
+    ``id``. Some payloads wrap the document in ``data``. Every known
+    spelling is accepted so that a document is never dropped because of
+    a field name.
+    """
+    for key in EXECUTION_ID_KEYS:
+        value = payload.get(key)
+        if value not in (None, ""):
+            return str(value)
+    for key in NESTED_PAYLOAD_KEYS:
+        nested = payload.get(key)
+        if isinstance(nested, Mapping):
+            found = extract_execution_id(nested)
+            if found:
+                return found
+    return None
 
 
 class BolnaProvider(VoiceProvider):
@@ -113,7 +146,8 @@ class BolnaProvider(VoiceProvider):
         if response.status_code >= 400:
             detail = response.text[:500]
             raise ProviderError(
-                f"Bolna returned HTTP {response.status_code} for {path}: {detail}"
+                f"Bolna returned HTTP {response.status_code} for {path}: {detail}",
+                provider_status_code=response.status_code,
             )
         if not response.content:
             return {}
@@ -135,8 +169,17 @@ class BolnaProvider(VoiceProvider):
             "agent_id": request.agent_id,
             "recipient_phone_number": request.to_number,
         }
-        if request.from_number:
-            body["from_phone_number"] = request.from_number
+        # ``from_phone_number`` is optional in Bolna's API: only the agent
+        # and the recipient are required. When it is omitted Bolna uses
+        # the account's default number and places the call through the
+        # telephony provider configured on the agent (Vobiz, Twilio,
+        # Plivo, ...). An empty value is never sent: the provider would
+        # reject it. A number that is sent must be E.164 and must exist
+        # on the provider account, otherwise Bolna answers with
+        # "Calling from_number ... doesn't exist for <provider>".
+        from_number = (request.from_number or "").strip()
+        if from_number:
+            body["from_phone_number"] = from_number
         if request.scheduled_at:
             body["scheduled_at"] = _iso_offset(request.scheduled_at)
         if request.user_data:
@@ -148,12 +191,17 @@ class BolnaProvider(VoiceProvider):
             body["agent_data"] = agent_data
 
         raw = self._request("POST", "/call", json=body)
-        execution_id = raw.get("execution_id") or raw.get("call_id")
+        execution_id = extract_execution_id(raw)
         if not execution_id:
             raise ProviderError("Bolna accepted the call but returned no execution_id")
         status = self.to_internal_status(raw.get("status") or "queued")
+        if status == CallStatus.UNKNOWN:
+            # The provider accepted the call but reported a status
+            # Callora does not know. "Queued" is the safe assumption: the
+            # call exists and has not been dialled yet.
+            status = CallStatus.QUEUED
         logger.info(
-            "bolna call placed",
+            "bolna_call_placed",
             extra={"execution_id": execution_id, "status": status},
         )
         return ProviderCallResult(
@@ -164,7 +212,20 @@ class BolnaProvider(VoiceProvider):
         )
 
     def get_call(self, execution_id: str) -> ProviderCallResult:
-        raw = self._request("GET", f"/executions/{execution_id}")
+        """Read the authoritative state of one execution.
+
+        A ``404`` means Bolna does not know the execution any more. That
+        is a confirmation, not a timeout, so it is reported as such.
+        """
+        try:
+            raw = self._request("GET", f"/executions/{execution_id}")
+        except ProviderError as exc:
+            if exc.provider_status_code == 404:
+                raise ProviderExecutionNotFoundError(
+                    f"Bolna does not know the execution {execution_id}",
+                    provider_status_code=404,
+                ) from exc
+            raise
         return ProviderCallResult(
             provider=self.name,
             execution_id=str(raw.get("id") or execution_id),
@@ -187,7 +248,7 @@ class BolnaProvider(VoiceProvider):
     ) -> ProviderEvent:
         """Normalize a Bolna execution payload into a provider event."""
         data: Dict[str, Any] = dict(payload)
-        execution_id = data.get("id") or data.get("execution_id")
+        execution_id = extract_execution_id(data)
         provider_status = data.get("status")
         key = event_fingerprint(self.name, execution_id, provider_status, data)
         return ProviderEvent(

@@ -132,6 +132,8 @@ class VoiceProvider(abc.ABC):
 
 
 #: Internal status used when a provider reports a status the adapter does
-#: not know. It is intentionally conservative: an unknown *terminal* status
-#: is treated as an error so it can never be mistaken for success.
-UNKNOWN_PROVIDER_STATUS = CallStatus.ERROR
+#: not know. It is deliberately *not* terminal: a status Callora has
+#: never seen says nothing about whether the call is over, so the call
+#: keeps its status and the reconciliation sweep resolves it by polling
+#: the provider.
+UNKNOWN_PROVIDER_STATUS = CallStatus.UNKNOWN
