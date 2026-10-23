@@ -8,3 +8,5 @@ __pycache__/
 # The template is tracked; the real file never is.
 .env.example
 !.env.example
+notebooks/
+*.db
