@@ -16,10 +16,11 @@ from app.modules.voice.constants import (
     HandoffStatus,
     JobStatus,
     JobType,
+    KnowledgeCategory,
 )
 from app.modules.voice.errors import WebhookSignatureError
 from app.modules.voice.jobs import queue
-from app.modules.voice.models import AuditLog, Call, CallEvent, Handoff
+from app.modules.voice.models import AuditLog, BusinessKnowledgeItem, Call, CallEvent, Handoff
 from app.modules.voice.webhooks.service import (
     RESULT_DUPLICATE,
     RESULT_IGNORED,
@@ -404,3 +405,52 @@ class TestPreTransfer:
         result = service.process_pre_transfer_event({"id": "exec_unknown"})
         assert result.status == RESULT_UNMATCHED
         assert db.query(Handoff).count() == 0
+
+
+# ---------------------------------------------------------------------------
+# Follow-up inquiries & tool webhooks
+# ---------------------------------------------------------------------------
+
+
+class TestFollowupWebhook:
+    def test_followup_webhook_answers_grounded_question(
+        self, voice_settings, db, voice_business, call
+    ):
+        k = BusinessKnowledgeItem(
+            business_id=VOICE_BIZ,
+            category=KnowledgeCategory.PRODUCT_FEATURE,
+            title="Bengaluru Flats",
+            content="We have 1BHK flats available in Bengaluru starting at 25 Lakhs.",
+            source_reference="Inventory 2026",
+            is_active=True,
+            priority=10,
+        )
+        db.add(k)
+        db.commit()
+
+        service = WebhookService(voice_settings, db, FakeProvider())
+        result = service.process_followup_event(
+            {
+                "id": "exec_1",
+                "question": "Do you have any 1BHK flats available in Bengaluru?",
+            }
+        )
+        assert result["status"] == RESULT_PROCESSED
+        assert result["call_id"] == call.id
+        assert "25 Lakhs" in result["response"]
+        assert "25 Lakhs" in result["answer"]
+        assert result["should_handoff"] is False
+
+    def test_followup_webhook_for_unknown_call_returns_graceful_spoken_fallback(
+        self, voice_settings, db, voice_business
+    ):
+        service = WebhookService(voice_settings, db, FakeProvider())
+        result = service.process_followup_event(
+            {
+                "id": "exec_nonexistent",
+                "question": "What properties do you have?",
+            }
+        )
+        assert result["status"] == RESULT_UNMATCHED
+        assert "apologize" in result["response"].lower() or "connect" in result["response"].lower()
+        assert result["should_handoff"] is True

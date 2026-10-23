@@ -20,6 +20,7 @@ OPT_OUT_PATTERNS = [
     r"\b(not\s+interested|stop\s+bothering|never\s+call)\b",
     r"\bunsubscribe\b",
     r"\bdo\s*not\s*contact\b",
+    r"(कॉल\s*मत\s*करो|फोन\s*मत\s*करो|नंबर\s*हटा\s*दो|बंद\s*करो|नहीं\s*चाहिए|दोबारा\s*फोन\s*मत\s*करना)",
 ]
 
 HUMAN_ESCALATION_PATTERNS = [
@@ -32,6 +33,7 @@ HUMAN_ESCALATION_PATTERNS = [
     r"\b(have\s+a\s+)?(supervisor|manager|specialist|human|someone)\s+call\s+me\s+back\b",
     r"\b(request|schedule|arrange)\s+(a\s+)?callback\b",
     r"\bcallback\b",
+    r"(इंसान|एजेंट|मैनेजर|अधिकारी|बात\s*करवाओ|ट्रांसफर\s*करो|कॉल\s*बैक\s*करो)",
 ]
 
 AMBIGUOUS_PATTERNS = [

@@ -13,7 +13,7 @@ sensible.
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.modules.voice.constants import (
     CallStatus,
@@ -625,11 +625,22 @@ class FollowUpQuestionRequest(BaseModel):
 
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
-    business_id: str = Field(min_length=1, max_length=64)
-    call_id: str = Field(min_length=1, max_length=64)
-    question: str = Field(min_length=1, max_length=1000)
+    business_id: Optional[str] = Field(default=None, max_length=64)
+    call_id: Optional[str] = Field(default=None, max_length=64)
+    execution_id: Optional[str] = Field(default=None, max_length=128)
+    question: Optional[str] = Field(default=None, max_length=1000)
+    query: Optional[str] = Field(default=None, max_length=1000)
+    text: Optional[str] = Field(default=None, max_length=1000)
     language: Optional[str] = "en"
     context: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_question_present(self) -> "FollowUpQuestionRequest":
+        q = (self.question or self.query or self.text or "").strip()
+        if not q:
+            raise ValueError("a non-empty question, query, or text is required")
+        self.question = q
+        return self
 
 
 class FollowUpQuestionResponse(BaseModel):
@@ -638,6 +649,8 @@ class FollowUpQuestionResponse(BaseModel):
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
     answer: str
+    response: Optional[str] = None
+    text: Optional[str] = None
     source_references: List[str] = Field(default_factory=list)
     should_handoff: bool = False
     handoff_recommended: bool = False
@@ -649,11 +662,22 @@ class FollowUpQuestionResponse(BaseModel):
     qualification_continuation: Optional[str] = None
     memory_state: Optional[Dict[str, Any]] = None
 
+    @model_validator(mode="after")
+    def populate_speech_aliases(self) -> "FollowUpQuestionResponse":
+        if self.response is None:
+            self.response = self.answer
+        if self.text is None:
+            self.text = self.answer
+        return self
+
 
 class BolnaToolDefinitionResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     tool: Dict[str, Any]
+    bolna_custom_task: Optional[Dict[str, Any]] = None
+    webhook_url: Optional[str] = None
+    api_url: Optional[str] = None
 
 
 __all__ = [

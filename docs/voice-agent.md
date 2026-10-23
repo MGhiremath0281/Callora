@@ -581,6 +581,11 @@ Bolna, not a tenant.
   `{"status": "unmatched"}`.
 * A terminal status queues the post-call job (never runs the analysis
   inline).
+* Live customer follow-up questions and custom tool webhooks are received at
+  `POST /api/v1/voice/webhooks/bolna/followup`. They resolve the call via
+  `execution_id` or `call_id`, query verified PostgreSQL business knowledge,
+  evaluate AI guardrails, update conversation memory, and return telephone-ready
+  speech answers without requiring tenant `X-API-Key` headers.
 
 ### 5.3 Webhook signature
 

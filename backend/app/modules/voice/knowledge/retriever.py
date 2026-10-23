@@ -22,13 +22,17 @@ CONFIDENCE_THRESHOLD = 0.35
 CATEGORY_HINTS = {
     KnowledgeCategory.PRICING: [
         "price", "pricing", "cost", "rate", "fee", "plan", "subscription",
-        "cheap", "inr", "rupees", "dollar", "payment", "discount",
-        "quote", "charge", "billing", "how much", "tier", "starter", "professional", "enterprise"
+        "cheap", "inr", "rupees", "dollar", "payment", "discount", "lakh", "crore", "budget",
+        "quote", "charge", "billing", "how much", "tier", "starter", "professional", "enterprise",
+        "कीमत", "लाख", "करोड़", "बजट", "दाम"
     ],
     KnowledgeCategory.PRODUCT_FEATURE: [
         "feature", "support", "integrate", "integration", "api", "tool",
         "dashboard", "mobile", "app", "export", "sync", "automation",
-        "webhook", "capacity", "platform", "capability", "languages", "hindi", "kannada"
+        "webhook", "capacity", "platform", "capability", "languages", "hindi", "kannada",
+        "property", "properties", "flat", "apartment", "villa", "plot", "bhk", "1bhk", "2bhk", "3bhk",
+        "available", "availability", "inventory", "bengaluru", "bangalore", "location", "city",
+        "प्रॉपर्टी", "फ्लैट", "उपलब्ध", "बेंगलुरु", "बैंगलोर"
     ],
     KnowledgeCategory.POLICY: [
         "refund", "cancel", "cancellation", "privacy", "security", "sla",

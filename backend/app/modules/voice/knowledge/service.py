@@ -76,10 +76,12 @@ class FollowUpService:
 
     def answer_question(self, request: FollowUpQuestionRequest) -> FollowUpQuestionResponse:
         """Validate context, retrieve verified facts, evaluate guardrails, and generate response."""
-        business, call = self._validate_context(request.business_id, request.call_id)
+        business, call = self._validate_context(
+            request.business_id, request.call_id, getattr(request, "execution_id", None)
+        )
         memory = self._load_or_init_memory(business, call, request)
 
-        question = request.question.strip()
+        question = (request.question or getattr(request, "query", None) or getattr(request, "text", None) or "").strip()
 
         # 1. Immediate Opt-Out & Refusal Guardrail
         if AIGuardrails.is_opt_out(question):
@@ -173,34 +175,57 @@ class FollowUpService:
 
     # -- Internal Handlers --------------------------------------------------
 
-    def _validate_context(self, business_id: str, call_id: str) -> Tuple[Business, Call]:
+    def _validate_context(
+        self,
+        business_id: Optional[str],
+        call_id: Optional[str],
+        execution_id: Optional[str] = None,
+    ) -> Tuple[Business, Call]:
+        call = None
+        if call_id and business_id:
+            call = repo.get_call(self._session, business_id, call_id)
+        elif call_id:
+            call = self._session.query(Call).filter(Call.id == call_id).first()
+            if call:
+                business_id = call.business_id
+        elif execution_id:
+            call = repo.get_call_by_provider_id(self._session, "bolna", execution_id)
+            if call is None:
+                call = self._session.query(Call).filter(Call.provider_call_id == str(execution_id)).first()
+            if call:
+                call_id = call.id
+                business_id = call.business_id
+
+        if not business_id:
+            raise BusinessNotFoundError("unknown_business")
+
         business = repo.get_business(self._session, business_id)
         if business is None:
             raise BusinessNotFoundError(business_id)
 
-        call = repo.get_call(self._session, business_id, call_id)
         if call is None:
-            # Check if call exists under another business to detect leakage
-            other_call = self._session.query(Call).filter(Call.id == call_id).first()
-            if other_call is not None and other_call.business_id != business_id:
-                raise CrossBusinessAccessError(
-                    f"Call '{call_id}' belongs to another business; cross-business access is forbidden"
-                )
-            raise CallNotFoundError(call_id)
+            if call_id:
+                other_call = self._session.query(Call).filter(Call.id == call_id).first()
+                if other_call is not None and other_call.business_id != business_id:
+                    raise CrossBusinessAccessError(
+                        f"Call '{call_id}' belongs to another business; cross-business access is forbidden"
+                    )
+                raise CallNotFoundError(call_id)
+            raise CallNotFoundError(execution_id or "missing_call_id")
 
         if call.business_id != business_id:
             raise CrossBusinessAccessError(
-                f"Call '{call_id}' belongs to another business; cross-business access is forbidden"
+                f"Call '{call.id}' belongs to another business; cross-business access is forbidden"
             )
 
         if call.status == CallStatus.BLOCKED:
             raise InvalidCallContextError(
-                f"Call '{call_id}' was blocked by compliance and cannot accept follow-up questions"
+                f"Call '{call.id}' was blocked by compliance and cannot accept follow-up questions"
             )
 
         if call.status not in VALID_CALL_STATUSES:
             raise InvalidCallContextError(
-                f"Call '{call_id}' is in terminal status '{call.status}'"
+                f"Call '{call.id}' is in terminal status '{call.status}'"
             )
 
         return business, call

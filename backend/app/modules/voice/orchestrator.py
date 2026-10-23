@@ -502,6 +502,16 @@ class CallOrchestrator:
             elif isinstance(item, str):
                 question_lines.append(item)
 
+        knowledge_lines = []
+        if business is not None:
+            active_knowledge = repo.list_knowledge_items(
+                self._session, business.id, is_active=True, limit=25
+            )
+            for k in active_knowledge:
+                knowledge_lines.append(f"[{k.category.upper()}] {k.title}: {k.content}")
+
+        knowledge_text = "\n".join(knowledge_lines)
+
         user_data: Dict[str, Any] = {
             "call_id": call_id or "",
             "business_id": (business.id if business is not None else request.business_id) or "",
@@ -511,6 +521,8 @@ class CallOrchestrator:
             "call_language": language or "",
             "qualification_questions": "\n".join(question_lines),
             "business_instructions": (business.agent_instructions if business else "") or "",
+            "business_knowledge": knowledge_text,
+            "knowledge_context": knowledge_text,
         }
         if lead is not None:
             if lead.custom_fields:

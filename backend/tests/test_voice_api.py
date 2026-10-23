@@ -588,6 +588,20 @@ class TestWebhooks:
         assert body["status"] == "processed"
         assert body["handoff_id"]
 
+    def test_a_followup_event_answers_question(self, voice_client, placed_call):
+        response = voice_client.post(
+            "/api/v1/voice/webhooks/bolna/followup",
+            json={
+                "id": "exec_1",
+                "question": "Can you tell me more about your service?",
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "processed"
+        assert "response" in body
+        assert "answer" in body
+
 
 # ---------------------------------------------------------------------------
 # Business configuration
