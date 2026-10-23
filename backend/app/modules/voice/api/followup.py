@@ -230,6 +230,9 @@ async def get_bolna_tool_definition(
             "param": {
                 "question": "%(question)s",
                 "language": "%(language)s",
+                "call_id": "%(call_id)s",
+                "business_id": "%(business_id)s",
+                "execution_id": "%(execution_id)s",
             },
         },
     }

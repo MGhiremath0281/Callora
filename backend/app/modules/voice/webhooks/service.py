@@ -289,6 +289,7 @@ class WebhookService:
         raw_body: bytes = b"",
     ) -> Dict[str, Any]:
         """Handle a mid-call follow-up question / tool webhook from Bolna."""
+        from app.modules.voice.constants import FollowUpAction
         from app.modules.voice.knowledge.service import FollowUpService
         from app.modules.voice.models import Call
         from app.modules.voice.schemas import FollowUpQuestionRequest
@@ -301,7 +302,15 @@ class WebhookService:
         nested_body = data.get("body") if isinstance(data.get("body"), dict) else {}
         nested_data = data.get("data") if isinstance(data.get("data"), dict) else {}
 
-        execution_id = (
+        def _clean_str(val: Any) -> Optional[str]:
+            if not val:
+                return None
+            s = str(val).strip()
+            if s.startswith("%(") and s.endswith(")s"):
+                return None
+            return s if s else None
+
+        execution_id = _clean_str(
             data.get("execution_id")
             or data.get("id")
             or data.get("executionId")
@@ -312,7 +321,7 @@ class WebhookService:
             or nested_data.get("execution_id")
             or nested_data.get("id")
         )
-        call_id = (
+        call_id = _clean_str(
             data.get("call_id")
             or nested_param.get("call_id")
             or nested_body.get("call_id")
@@ -332,7 +341,7 @@ class WebhookService:
 
         # Fallback to business_id's most recent active call if available
         if call is None:
-            biz_id = data.get("business_id") or nested_param.get("business_id")
+            biz_id = _clean_str(data.get("business_id") or nested_param.get("business_id"))
             if biz_id:
                 call = (
                     self._session.query(Call)
@@ -369,7 +378,56 @@ class WebhookService:
 
         question_str = str(question).strip()
 
+        # 3. Extract language & context
+        language = (
+            data.get("language")
+            or nested_param.get("language")
+            or (call.language if call else None)
+            or "en"
+        )
+        context = data.get("context") or nested_param.get("context") or {}
+
         if call is None:
+            # First attempt to find business_id or default business
+            from app.modules.voice.models import Business
+            biz = None
+            raw_biz_id = _clean_str(data.get("business_id") or nested_param.get("business_id"))
+            if raw_biz_id:
+                biz = repo.get_business(self._session, raw_biz_id)
+            if biz is None:
+                biz = self._session.query(Business).first()
+
+            if biz:
+                service = FollowUpService(self._settings, self._session)
+                request_obj = FollowUpQuestionRequest(
+                    business_id=biz.id,
+                    call_id=None,
+                    execution_id=None,
+                    question=question_str,
+                    language=str(language or "en"),
+                    context=context if isinstance(context, dict) else {},
+                )
+                resp = service.answer_question(request_obj)
+                if resp.action == FollowUpAction.ANSWER and resp.source_references:
+                    return {
+                        "status": RESULT_PROCESSED,
+                        "call_id": None,
+                        "execution_id": str(execution_id) if execution_id else None,
+                        "signature_valid": signature_valid,
+                        "response": resp.answer,
+                        "answer": resp.answer,
+                        "text": resp.answer,
+                        "source_references": resp.source_references,
+                        "should_handoff": resp.should_handoff,
+                        "handoff_recommended": resp.handoff_recommended,
+                        "handoff_type": resp.handoff_type,
+                        "handoff_id": resp.handoff_id,
+                        "action": resp.action,
+                        "confidence": resp.confidence,
+                        "qualification_continuation": resp.qualification_continuation,
+                        "memory_state": resp.memory_state,
+                    }
+
             fallback = (
                 "I don't have that specific information right in front of me, but our team can help you. "
                 "Would you like me to connect you with our specialist?"
@@ -385,15 +443,6 @@ class WebhookService:
                 "handoff_recommended": True,
                 "detail": "no active call matches this provider call id",
             }
-
-        # 3. Extract language & context
-        language = (
-            data.get("language")
-            or nested_param.get("language")
-            or call.language
-            or "en"
-        )
-        context = data.get("context") or nested_param.get("context") or {}
 
         # 4. Invoke FollowUpService
         service = FollowUpService(self._settings, self._session)

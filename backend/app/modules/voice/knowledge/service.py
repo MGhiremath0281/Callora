@@ -114,51 +114,56 @@ class FollowUpService:
         answer, confidence = self._generate_grounded_answer(business, question, retrieval)
 
         # 7. Qualification Continuation
-        continuation_prompt = self._resolve_next_qualification_question(business, memory)
+        continuation_prompt = (
+            self._resolve_next_qualification_question(business, memory)
+            if memory
+            else None
+        )
         full_answer = answer
         if continuation_prompt:
             full_answer = f"{answer} {continuation_prompt}"
 
         # 8. Update Memory & Audit Trail
-        memory_record = {
-            "question": question,
-            "answer": full_answer,
-            "sources": retrieval.sources,
-            "timestamp": utcnow().isoformat(),
-        }
-        questions_answered = list(memory.questions_answered or [])
-        questions_answered.append(memory_record)
-
-        repo.update_call_memory(
-            self._session,
-            memory,
-            {
-                "questions_answered": questions_answered,
-                "last_customer_question": question,
-                "last_agent_answer": full_answer,
-                "customer_intent": "inquire_business_knowledge",
-            },
-        )
-
-        self._sync_call_metadata(call, memory)
-
-        repo.add_audit_log(
-            self._session,
-            action=AuditAction.FOLLOWUP_ANSWERED,
-            business_id=business.id,
-            actor="ai_voice_followup",
-            entity_type="call",
-            entity_id=call.id,
-            decision="allow",
-            reason_code="grounded_answer",
-            reason="Follow-up question answered using verified business knowledge",
-            metadata={
+        if memory and call:
+            memory_record = {
                 "question": question,
+                "answer": full_answer,
                 "sources": retrieval.sources,
-                "confidence": confidence,
-            },
-        )
-        self._session.commit()
+                "timestamp": utcnow().isoformat(),
+            }
+            questions_answered = list(memory.questions_answered or [])
+            questions_answered.append(memory_record)
+
+            repo.update_call_memory(
+                self._session,
+                memory,
+                {
+                    "questions_answered": questions_answered,
+                    "last_customer_question": question,
+                    "last_agent_answer": full_answer,
+                    "customer_intent": "inquire_business_knowledge",
+                },
+            )
+
+            self._sync_call_metadata(call, memory)
+
+            repo.add_audit_log(
+                self._session,
+                action=AuditAction.FOLLOWUP_ANSWERED,
+                business_id=business.id,
+                actor="ai_voice_followup",
+                entity_type="call",
+                entity_id=call.id,
+                decision="allow",
+                reason_code="grounded_answer",
+                reason="Follow-up question answered using verified business knowledge",
+                metadata={
+                    "question": question,
+                    "sources": retrieval.sources,
+                    "confidence": confidence,
+                },
+            )
+            self._session.commit()
 
         return FollowUpQuestionResponse(
             answer=full_answer,
@@ -170,7 +175,7 @@ class FollowUpService:
             action=FollowUpAction.ANSWER,
             confidence=confidence,
             qualification_continuation=continuation_prompt,
-            memory_state=self._memory_summary(memory),
+            memory_state=self._memory_summary(memory) if memory else {},
         )
 
     # -- Internal Handlers --------------------------------------------------
@@ -180,7 +185,8 @@ class FollowUpService:
         business_id: Optional[str],
         call_id: Optional[str],
         execution_id: Optional[str] = None,
-    ) -> Tuple[Business, Call]:
+        allow_missing_call: bool = True,
+    ) -> Tuple[Business, Optional[Call]]:
         call = None
         if call_id and business_id:
             call = repo.get_call(self._session, business_id, call_id)
@@ -197,7 +203,11 @@ class FollowUpService:
                 business_id = call.business_id
 
         if not business_id:
-            raise BusinessNotFoundError("unknown_business")
+            first_biz = self._session.query(Business).first()
+            if first_biz:
+                business_id = first_biz.id
+            else:
+                raise BusinessNotFoundError("unknown_business")
 
         business = repo.get_business(self._session, business_id)
         if business is None:
@@ -211,7 +221,11 @@ class FollowUpService:
                         f"Call '{call_id}' belongs to another business; cross-business access is forbidden"
                     )
                 raise CallNotFoundError(call_id)
-            raise CallNotFoundError(execution_id or "missing_call_id")
+            if execution_id:
+                raise CallNotFoundError(execution_id)
+            if not allow_missing_call:
+                raise CallNotFoundError("missing_call_id")
+            return business, None
 
         if call.business_id != business_id:
             raise CrossBusinessAccessError(
@@ -231,8 +245,10 @@ class FollowUpService:
         return business, call
 
     def _load_or_init_memory(
-        self, business: Business, call: Call, request: FollowUpQuestionRequest
-    ) -> VoiceCallMemory:
+        self, business: Business, call: Optional[Call], request: FollowUpQuestionRequest
+    ) -> Optional[VoiceCallMemory]:
+        if call is None:
+            return None
         memory = repo.get_or_create_call_memory(
             self._session,
             business_id=business.id,
@@ -267,15 +283,19 @@ class FollowUpService:
         return memory
 
     def _handle_opt_out(
-        self, business: Business, call: Call, memory: VoiceCallMemory, question: str
+        self,
+        business: Business,
+        call: Optional[Call],
+        memory: Optional[VoiceCallMemory],
+        question: str,
     ) -> FollowUpQuestionResponse:
         """Immediately respect customer refusals and mark DND."""
-        if call.lead_id:
+        if call and call.lead_id:
             repo.upsert_lead_profile(
                 self._session, business.id, call.lead_id, {"do_not_call": True}
             )
 
-        phone = call.to_number or ""
+        phone = (call.to_number or "") if call else ""
         if phone:
             repo.add_dnd_entry(
                 self._session,
@@ -291,43 +311,44 @@ class FollowUpService:
             "from our contact list and we will not call you again. Thank you, and have a good day."
         )
 
-        questions_answered = list(memory.questions_answered or [])
-        questions_answered.append(
-            {
-                "question": question,
-                "answer": answer,
-                "sources": ["Customer Opt-Out Policy"],
-                "action": FollowUpAction.OPT_OUT,
-                "timestamp": utcnow().isoformat(),
-            }
-        )
+        if memory and call:
+            questions_answered = list(memory.questions_answered or [])
+            questions_answered.append(
+                {
+                    "question": question,
+                    "answer": answer,
+                    "sources": ["Customer Opt-Out Policy"],
+                    "action": FollowUpAction.OPT_OUT,
+                    "timestamp": utcnow().isoformat(),
+                }
+            )
 
-        repo.update_call_memory(
-            self._session,
-            memory,
-            {
-                "opt_out_detected": True,
-                "customer_intent": "opt_out",
-                "questions_answered": questions_answered,
-                "last_customer_question": question,
-                "last_agent_answer": answer,
-            },
-        )
-        self._sync_call_metadata(call, memory)
+            repo.update_call_memory(
+                self._session,
+                memory,
+                {
+                    "opt_out_detected": True,
+                    "customer_intent": "opt_out",
+                    "questions_answered": questions_answered,
+                    "last_customer_question": question,
+                    "last_agent_answer": answer,
+                },
+            )
+            self._sync_call_metadata(call, memory)
 
-        repo.add_audit_log(
-            self._session,
-            action=AuditAction.CUSTOMER_OPT_OUT,
-            business_id=business.id,
-            actor="customer",
-            entity_type="call",
-            entity_id=call.id,
-            decision="allow",
-            reason_code="opt_out_requested",
-            reason="Customer requested to opt out during live call; marked DND and do_not_call",
-            metadata={"question": question, "phone": phone},
-        )
-        self._session.commit()
+            repo.add_audit_log(
+                self._session,
+                action=AuditAction.CUSTOMER_OPT_OUT,
+                business_id=business.id,
+                actor="customer",
+                entity_type="call",
+                entity_id=call.id,
+                decision="allow",
+                reason_code="opt_out_requested",
+                reason="Customer requested to opt out during live call; marked DND and do_not_call",
+                metadata={"question": question, "phone": phone},
+            )
+            self._session.commit()
 
         return FollowUpQuestionResponse(
             answer=answer,
@@ -338,65 +359,75 @@ class FollowUpService:
             handoff_type=None,
             action=FollowUpAction.OPT_OUT,
             confidence=1.0,
-            memory_state=self._memory_summary(memory),
+            memory_state=self._memory_summary(memory) if memory else {},
         )
 
     def _handle_human_escalation(
-        self, business: Business, call: Call, memory: VoiceCallMemory, question: str
+        self,
+        business: Business,
+        call: Optional[Call],
+        memory: Optional[VoiceCallMemory],
+        question: str,
     ) -> FollowUpQuestionResponse:
         """Execute configured transfer or callback when human requested."""
+        handoff_id = None
         if business.warm_transfer_enabled and (
             business.warm_transfer_number or business.handoff_target_number
         ):
             target = business.warm_transfer_number or business.handoff_target_number
-            handoff = self._handoff_service.record_warm_transfer(
-                call=call,
-                reason=question,
-                summary="Customer explicitly requested live human transfer during conversation",
-                transferred_to=target,
-            )
+            if call:
+                handoff = self._handoff_service.record_warm_transfer(
+                    call=call,
+                    reason=question,
+                    summary="Customer explicitly requested live human transfer during conversation",
+                    transferred_to=target,
+                )
+                handoff_id = handoff.id
             handoff_type = HandoffKind.WARM_TRANSFER
             answer = "I would be happy to connect you with our specialist. Please hold for just a moment while I transfer your call."
         else:
-            handoff = self._handoff_service.request_callback(
-                business_id=business.id,
-                lead_id=call.lead_id,
-                call_id=call.id,
-                reason=question,
-                briefing="Customer requested assistance; live transfer unavailable, scheduled callback",
-                requested_by="ai",
-            )
+            if call:
+                handoff = self._handoff_service.request_callback(
+                    business_id=business.id,
+                    lead_id=call.lead_id,
+                    call_id=call.id,
+                    reason=question,
+                    briefing="Customer requested assistance; live transfer unavailable, scheduled callback",
+                    requested_by="ai",
+                )
+                handoff_id = handoff.id
             handoff_type = HandoffKind.CALLBACK
             answer = "Our specialists are currently assisting other clients, but I can arrange a quick callback for you. What time today or tomorrow works best for you?"
 
-        questions_answered = list(memory.questions_answered or [])
-        questions_answered.append(
-            {
-                "question": question,
-                "answer": answer,
-                "sources": ["Human Escalation Policy"],
-                "action": FollowUpAction.ESCALATE,
-                "timestamp": utcnow().isoformat(),
-            }
-        )
+        if memory and call:
+            questions_answered = list(memory.questions_answered or [])
+            questions_answered.append(
+                {
+                    "question": question,
+                    "answer": answer,
+                    "sources": ["Human Escalation Policy"],
+                    "action": FollowUpAction.ESCALATE,
+                    "timestamp": utcnow().isoformat(),
+                }
+            )
 
-        repo.update_call_memory(
-            self._session,
-            memory,
-            {
-                "handoff_status": (
-                    HandoffStatus.INITIATED
-                    if handoff_type == HandoffKind.WARM_TRANSFER
-                    else HandoffStatus.REQUESTED
-                ),
-                "customer_intent": "request_human",
-                "questions_answered": questions_answered,
-                "last_customer_question": question,
-                "last_agent_answer": answer,
-            },
-        )
-        self._sync_call_metadata(call, memory)
-        self._session.commit()
+            repo.update_call_memory(
+                self._session,
+                memory,
+                {
+                    "handoff_status": (
+                        HandoffStatus.INITIATED
+                        if handoff_type == HandoffKind.WARM_TRANSFER
+                        else HandoffStatus.REQUESTED
+                    ),
+                    "customer_intent": "request_human",
+                    "questions_answered": questions_answered,
+                    "last_customer_question": question,
+                    "last_agent_answer": answer,
+                },
+            )
+            self._sync_call_metadata(call, memory)
+            self._session.commit()
 
         return FollowUpQuestionResponse(
             answer=answer,
@@ -405,56 +436,57 @@ class FollowUpService:
             handoff_recommended=True,
             handoff_reason="Customer requested live human assistance",
             handoff_type=handoff_type,
-            handoff_id=handoff.id,
+            handoff_id=handoff_id,
             action=FollowUpAction.ESCALATE,
             confidence=1.0,
-            memory_state=self._memory_summary(memory),
+            memory_state=self._memory_summary(memory) if memory else {},
         )
 
     def _handle_clarification(
         self,
         business: Business,
-        call: Call,
-        memory: VoiceCallMemory,
+        call: Optional[Call],
+        memory: Optional[VoiceCallMemory],
         question: str,
         clarification_msg: str,
     ) -> FollowUpQuestionResponse:
-        questions_answered = list(memory.questions_answered or [])
-        questions_answered.append(
-            {
-                "question": question,
-                "answer": clarification_msg,
-                "sources": [],
-                "action": FollowUpAction.CLARIFY,
-                "timestamp": utcnow().isoformat(),
-            }
-        )
+        if memory and call:
+            questions_answered = list(memory.questions_answered or [])
+            questions_answered.append(
+                {
+                    "question": question,
+                    "answer": clarification_msg,
+                    "sources": [],
+                    "action": FollowUpAction.CLARIFY,
+                    "timestamp": utcnow().isoformat(),
+                }
+            )
 
-        repo.update_call_memory(
-            self._session,
-            memory,
-            {
-                "customer_intent": "ambiguous_question",
-                "questions_answered": questions_answered,
-                "last_customer_question": question,
-                "last_agent_answer": clarification_msg,
-            },
-        )
-        self._sync_call_metadata(call, memory)
+            repo.update_call_memory(
+                self._session,
+                memory,
+                {
+                    "customer_intent": "ambiguous_question",
+                    "questions_answered": questions_answered,
+                    "last_customer_question": question,
+                    "last_agent_answer": clarification_msg,
+                },
+            )
+            self._sync_call_metadata(call, memory)
 
-        repo.add_audit_log(
-            self._session,
-            action=AuditAction.FOLLOWUP_CLARIFY,
-            business_id=business.id,
-            actor="ai_voice_followup",
-            entity_type="call",
-            entity_id=call.id,
-            decision="allow",
-            reason_code="ambiguous_question",
-            reason="Ambiguous question triggered clarification request",
-            metadata={"question": question},
-        )
-        self._session.commit()
+            repo.add_audit_log(
+                self._session,
+                action=AuditAction.FOLLOWUP_CLARIFY,
+                business_id=business.id,
+                actor="ai_voice_followup",
+                entity_type="call",
+                entity_id=call.id,
+                decision="allow",
+                reason_code="ambiguous_question",
+                reason="Ambiguous question triggered clarification request",
+                metadata={"question": question},
+            )
+            self._session.commit()
 
         return FollowUpQuestionResponse(
             answer=clarification_msg,
@@ -465,88 +497,94 @@ class FollowUpService:
             handoff_type=None,
             action=FollowUpAction.CLARIFY,
             confidence=0.5,
-            memory_state=self._memory_summary(memory),
+            memory_state=self._memory_summary(memory) if memory else {},
         )
 
     def _handle_unsupported_question(
         self,
         business: Business,
-        call: Call,
-        memory: VoiceCallMemory,
+        call: Optional[Call],
+        memory: Optional[VoiceCallMemory],
         question: str,
         sources: List[str],
     ) -> FollowUpQuestionResponse:
         """Never invent facts: acknowledge missing info and offer escalation."""
+        handoff_id = None
         if business.warm_transfer_enabled and (
             business.warm_transfer_number or business.handoff_target_number
         ):
             target = business.warm_transfer_number or business.handoff_target_number
-            handoff = self._handoff_service.record_warm_transfer(
-                call=call,
-                reason=f"Question out of verified knowledge: {question}",
-                summary="AI could not answer reliably from verified knowledge; transferring to specialist",
-                transferred_to=target,
-            )
+            if call:
+                handoff = self._handoff_service.record_warm_transfer(
+                    call=call,
+                    reason=f"Question out of verified knowledge: {question}",
+                    summary="AI could not answer reliably from verified knowledge; transferring to specialist",
+                    transferred_to=target,
+                )
+                handoff_id = handoff.id
             handoff_type = HandoffKind.WARM_TRANSFER
             answer = (
                 "I don't have that specific information with me right now. Let me connect you directly "
                 "with our specialist who can help answer that for you."
             )
         else:
-            handoff = self._handoff_service.request_callback(
-                business_id=business.id,
-                lead_id=call.lead_id,
-                call_id=call.id,
-                reason=f"Question out of verified knowledge: {question}",
-                briefing="Question unsupported by knowledge base; callback scheduled",
-                requested_by="ai",
-            )
+            if call:
+                handoff = self._handoff_service.request_callback(
+                    business_id=business.id,
+                    lead_id=call.lead_id,
+                    call_id=call.id,
+                    reason=f"Question out of verified knowledge: {question}",
+                    briefing="Question unsupported by knowledge base; callback scheduled",
+                    requested_by="ai",
+                )
+                handoff_id = handoff.id
             handoff_type = HandoffKind.CALLBACK
             answer = (
                 "I don't have that specific information right in front of me, but I can have our team "
                 "follow up with you directly. Would you like a quick callback with the details?"
             )
 
-        questions_answered = list(memory.questions_answered or [])
-        questions_answered.append(
-            {
-                "question": question,
-                "answer": answer,
-                "sources": sources,
-                "action": FollowUpAction.ESCALATE,
-                "timestamp": utcnow().isoformat(),
-            }
-        )
+        if memory and call:
+            questions_answered = list(memory.questions_answered or [])
+            questions_answered.append(
+                {
+                    "question": question,
+                    "answer": answer,
+                    "sources": sources,
+                    "action": FollowUpAction.ESCALATE,
+                    "timestamp": utcnow().isoformat(),
+                }
+            )
 
-        repo.update_call_memory(
-            self._session,
-            memory,
-            {
-                "handoff_status": (
-                    HandoffStatus.INITIATED
-                    if handoff_type == HandoffKind.WARM_TRANSFER
-                    else HandoffStatus.REQUESTED
-                ),
-                "questions_answered": questions_answered,
-                "last_customer_question": question,
-                "last_agent_answer": answer,
-            },
-        )
-        self._sync_call_metadata(call, memory)
+            repo.update_call_memory(
+                self._session,
+                memory,
+                {
+                    "handoff_status": (
+                        HandoffStatus.INITIATED
+                        if handoff_type == HandoffKind.WARM_TRANSFER
+                        else HandoffStatus.REQUESTED
+                    ),
+                    "questions_answered": questions_answered,
+                    "last_customer_question": question,
+                    "last_agent_answer": answer,
+                },
+            )
+            self._sync_call_metadata(call, memory)
 
-        repo.add_audit_log(
-            self._session,
-            action=AuditAction.FOLLOWUP_ESCALATED,
-            business_id=business.id,
-            actor="ai_voice_followup",
-            entity_type="call",
-            entity_id=call.id,
-            decision="allow",
-            reason_code="knowledge_missing",
-            reason="Question could not be answered reliably from verified knowledge; escalated",
-            metadata={"question": question, "handoff_type": handoff_type},
-        )
-        self._session.commit()
+            repo.add_audit_log(
+                self._session,
+                action=AuditAction.FOLLOWUP_ESCALATED,
+                business_id=business.id,
+                actor="ai_voice_followup",
+                entity_type="call",
+                entity_id=call.id,
+                decision="allow",
+                reason_code="knowledge_missing",
+                reason="Question could not be answered reliably from verified knowledge; escalated",
+                metadata={"question": question, "handoff_type": handoff_type},
+            )
+            self._session.commit()
 
         return FollowUpQuestionResponse(
             answer=answer,
@@ -555,10 +593,10 @@ class FollowUpService:
             handoff_recommended=True,
             handoff_reason="The requested information is not in the verified business knowledge base",
             handoff_type=handoff_type,
-            handoff_id=handoff.id,
+            handoff_id=handoff_id,
             action=FollowUpAction.ESCALATE,
             confidence=0.0,
-            memory_state=self._memory_summary(memory),
+            memory_state=self._memory_summary(memory) if memory else {},
         )
 
     def _generate_grounded_answer(
