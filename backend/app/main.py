@@ -24,6 +24,9 @@ from app.modules.crm_sync import connection_seed
 from app.modules.crm_sync import router as crm_sync_api
 from app.modules.recovery_agent import router as recovery_agent_api
 from app.modules.recovery_dashboard import router as recovery_dashboard_api
+from app.modules.analytics_agent import router as analytics_api
+from app.modules.analytics_agent.dashboard_ui import render_analytics_dashboard
+from fastapi.responses import HTMLResponse
 from app.modules.voice.api import businesses as voice_businesses_api
 from app.modules.voice.api import calls as voice_calls_api
 from app.modules.voice.api import followup as voice_followup_api
@@ -89,6 +92,11 @@ app.include_router(voice_webhooks_api.router, prefix=API_PREFIX)
 app.include_router(voice_knowledge_api.router, prefix=API_PREFIX)
 app.include_router(voice_followup_api.router, prefix=API_PREFIX)
 
+# Analytics Agent routes (Module 7).
+# Registered at root level (/analytics/...) and under /api/v1 (/api/v1/analytics/...)
+app.include_router(analytics_api.router)
+app.include_router(analytics_api.router, prefix=API_PREFIX)
+
 
 @app.get("/")
 def read_root():
@@ -98,3 +106,8 @@ def read_root():
 @app.get("/health")
 def health_check():
     return {"status": "healthy"}
+
+
+@app.get("/dashboard", response_class=HTMLResponse, tags=["Dashboard"])
+def read_dashboard(business_id: str = "biz_001"):
+    return HTMLResponse(content=render_analytics_dashboard(business_id=business_id))
