@@ -157,7 +157,7 @@ class CallOrchestrator:
 
         try:
             provider_request = self._build_provider_request(
-                request, business, lead, now
+                request, business, lead, now, call_id=call.id
             )
             result = self._start_call_with_retry(provider, provider_request)
         except ProviderConnectionError as exc:
@@ -452,6 +452,7 @@ class CallOrchestrator:
         business: Optional[Business],
         lead,
         now: datetime,
+        call_id: Optional[str] = None,
     ) -> OutboundCallRequest:
         agent_id = (
             request.agent_id
@@ -460,7 +461,7 @@ class CallOrchestrator:
             or ""
         )
         language = self._resolve_language(request, business, lead)
-        user_data = self._build_user_data(request, business, lead, language)
+        user_data = self._build_user_data(request, business, lead, language, call_id=call_id)
         metadata: Dict[str, Any] = {
             "provider_requested_at": now.isoformat(),
         }
@@ -480,6 +481,7 @@ class CallOrchestrator:
         business: Optional[Business],
         lead,
         language: Optional[str],
+        call_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Variables injected into the Bolna agent prompt.
 
@@ -500,13 +502,27 @@ class CallOrchestrator:
             elif isinstance(item, str):
                 question_lines.append(item)
 
+        knowledge_lines = []
+        if business is not None:
+            active_knowledge = repo.list_knowledge_items(
+                self._session, business.id, is_active=True, limit=25
+            )
+            for k in active_knowledge:
+                knowledge_lines.append(f"[{k.category.upper()}] {k.title}: {k.content}")
+
+        knowledge_text = "\n".join(knowledge_lines)
+
         user_data: Dict[str, Any] = {
+            "call_id": call_id or "",
+            "business_id": (business.id if business is not None else request.business_id) or "",
             "lead_name": (lead.name if lead is not None else "") or "",
             "lead_phone": (lead.phone if lead is not None else "") or "",
             "business_name": (business.name if business is not None else "") or "",
             "call_language": language or "",
             "qualification_questions": "\n".join(question_lines),
             "business_instructions": (business.agent_instructions if business else "") or "",
+            "business_knowledge": knowledge_text,
+            "knowledge_context": knowledge_text,
         }
         if lead is not None:
             if lead.custom_fields:

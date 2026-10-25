@@ -377,6 +377,45 @@ class AuditAction:
     JOB_RETRIED = "job.retried"
     BUSINESS_CONFIG_UPDATED = "business.config_updated"
     CALL_CANCELED = "call.canceled"
+    KNOWLEDGE_CREATED = "knowledge.created"
+    KNOWLEDGE_UPDATED = "knowledge.updated"
+    KNOWLEDGE_DELETED = "knowledge.deleted"
+    FOLLOWUP_ANSWERED = "followup.answered"
+    FOLLOWUP_CLARIFY = "followup.clarify"
+    FOLLOWUP_ESCALATED = "followup.escalated"
+    CUSTOMER_OPT_OUT = "customer.opt_out"
+
+
+class KnowledgeCategory:
+    """Categories of verified business knowledge."""
+
+    FAQ = "faq"
+    PRODUCT_FEATURE = "product_feature"
+    PRICING = "pricing"
+    ELIGIBILITY = "eligibility"
+    POLICY = "policy"
+    OBJECTION_HANDLING = "objection_handling"
+    ESCALATION_RULE = "escalation_rule"
+
+
+ALL_KNOWLEDGE_CATEGORIES = (
+    KnowledgeCategory.FAQ,
+    KnowledgeCategory.PRODUCT_FEATURE,
+    KnowledgeCategory.PRICING,
+    KnowledgeCategory.ELIGIBILITY,
+    KnowledgeCategory.POLICY,
+    KnowledgeCategory.OBJECTION_HANDLING,
+    KnowledgeCategory.ESCALATION_RULE,
+)
+
+
+class FollowUpAction:
+    """Action recommendation resulting from a customer question."""
+
+    ANSWER = "answer"
+    CLARIFY = "clarify"
+    ESCALATE = "escalate"
+    OPT_OUT = "opt_out"
 
 
 #: Languages the voice pipeline is expected to handle. The language is a

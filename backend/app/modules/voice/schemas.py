@@ -13,16 +13,18 @@ sensible.
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.modules.voice.constants import (
     CallStatus,
     ConsentChannel,
     ConsentStatus,
     DndScope,
+    FollowUpAction,
     HandoffKind,
     HandoffStatus,
     JobStatus,
+    KnowledgeCategory,
     RefusalCategory,
 )
 
@@ -566,8 +568,121 @@ class WebhookAck(BaseModel):
     detail: Optional[str] = None
 
 
+# ---------------------------------------------------------------------------
+# Knowledge Base & Follow-Up Questions
+# ---------------------------------------------------------------------------
+
+
+class KnowledgeItemCreate(VoiceModel):
+    category: str = Field(default=KnowledgeCategory.FAQ, max_length=64)
+    title: str = Field(min_length=1, max_length=255)
+    content: str = Field(min_length=1)
+    tags: List[str] = Field(default_factory=list)
+    source_reference: str = Field(default="Verified Business Knowledge", max_length=255)
+    is_active: bool = True
+    priority: int = 0
+    extra_metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class KnowledgeItemUpdate(VoiceModel):
+    category: Optional[str] = Field(default=None, max_length=64)
+    title: Optional[str] = Field(default=None, max_length=255)
+    content: Optional[str] = None
+    tags: Optional[List[str]] = None
+    source_reference: Optional[str] = Field(default=None, max_length=255)
+    is_active: Optional[bool] = None
+    priority: Optional[int] = None
+    extra_metadata: Optional[Dict[str, Any]] = None
+
+
+class KnowledgeItemResponse(VoiceModel):
+    id: str
+    business_id: str
+    category: str
+    title: str
+    content: str
+    tags: List[str] = Field(default_factory=list)
+    source_reference: str
+    is_active: bool
+    priority: int
+    extra_metadata: Dict[str, Any] = Field(default_factory=dict)
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class KnowledgeItemListResponse(VoiceModel):
+    items: List[KnowledgeItemResponse] = Field(default_factory=list)
+    total: int = 0
+    business_id: str
+
+
+class KnowledgeItemBatchCreate(VoiceModel):
+    items: List[KnowledgeItemCreate] = Field(default_factory=list)
+
+
+class FollowUpQuestionRequest(BaseModel):
+    """Payload sent by Bolna (or test clients) when a follow-up question occurs."""
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    business_id: Optional[str] = Field(default=None, max_length=64)
+    call_id: Optional[str] = Field(default=None, max_length=64)
+    execution_id: Optional[str] = Field(default=None, max_length=128)
+    question: Optional[str] = Field(default=None, max_length=1000)
+    query: Optional[str] = Field(default=None, max_length=1000)
+    text: Optional[str] = Field(default=None, max_length=1000)
+    language: Optional[str] = "en"
+    context: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_question_present(self) -> "FollowUpQuestionRequest":
+        q = (self.question or self.query or self.text or "").strip()
+        if not q:
+            raise ValueError("a non-empty question, query, or text is required")
+        self.question = q
+        return self
+
+
+class FollowUpQuestionResponse(BaseModel):
+    """Answer and metadata returned to Bolna mid-conversation."""
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    answer: str
+    response: Optional[str] = None
+    text: Optional[str] = None
+    source_references: List[str] = Field(default_factory=list)
+    should_handoff: bool = False
+    handoff_recommended: bool = False
+    handoff_reason: Optional[str] = None
+    handoff_type: Optional[str] = None
+    handoff_id: Optional[str] = None
+    action: str = Field(default=FollowUpAction.ANSWER)
+    confidence: float = 1.0
+    qualification_continuation: Optional[str] = None
+    memory_state: Optional[Dict[str, Any]] = None
+
+    @model_validator(mode="after")
+    def populate_speech_aliases(self) -> "FollowUpQuestionResponse":
+        if self.response is None:
+            self.response = self.answer
+        if self.text is None:
+            self.text = self.answer
+        return self
+
+
+class BolnaToolDefinitionResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    tool: Dict[str, Any]
+    bolna_custom_task: Optional[Dict[str, Any]] = None
+    webhook_url: Optional[str] = None
+    api_url: Optional[str] = None
+
+
 __all__ = [
     "AuditLogResponse",
+    "BolnaToolDefinitionResponse",
     "BusinessProfile",
     "BusinessProfileUpdate",
     "CallEventResponse",
@@ -583,9 +698,18 @@ __all__ = [
     "ConsentRecordResponse",
     "DndEntryCreate",
     "DndEntryResponse",
+    "FollowUpAction",
+    "FollowUpQuestionRequest",
+    "FollowUpQuestionResponse",
     "HandoffResponse",
     "HandoffUpdate",
     "JobResponse",
+    "KnowledgeCategory",
+    "KnowledgeItemBatchCreate",
+    "KnowledgeItemCreate",
+    "KnowledgeItemListResponse",
+    "KnowledgeItemResponse",
+    "KnowledgeItemUpdate",
     "QualificationQuestion",
     "VoiceLeadProfile",
     "VoiceLeadProfileUpdate",

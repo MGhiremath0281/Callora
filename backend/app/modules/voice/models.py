@@ -410,3 +410,90 @@ class Job(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
     )
+
+
+# ---------------------------------------------------------------------------
+# Business Knowledge Base
+# ---------------------------------------------------------------------------
+
+
+class BusinessKnowledgeItem(Base):
+    """Verified business knowledge scoped strictly to one business.
+
+    Holds verified FAQs, product features, pricing, eligibility, policies,
+    objection handling and escalation rules.
+    """
+
+    __tablename__ = "business_knowledge_items"
+    __table_args__ = (
+        Index("ix_knowledge_business_category", "business_id", "category"),
+        Index("ix_knowledge_business_active", "business_id", "is_active"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(32), primary_key=True, default=lambda: prefixed_id("kb")
+    )
+    business_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    category: Mapped[str] = mapped_column(String(64), nullable=False, default="faq")
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    tags: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    source_reference: Mapped[str] = mapped_column(
+        String(255), nullable=False, default="Verified Business Knowledge"
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    extra_metadata: Mapped[Dict[str, Any]] = mapped_column(
+        "extra_metadata", JSON, nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+# ---------------------------------------------------------------------------
+# Conversation Memory
+# ---------------------------------------------------------------------------
+
+
+class VoiceCallMemory(Base):
+    """Live conversational state and qualification memory for one call."""
+
+    __tablename__ = "voice_call_memories"
+    __table_args__ = (
+        UniqueConstraint("call_id", name="uq_voice_call_memories_call"),
+        Index("ix_voice_call_memories_business", "business_id"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(32), primary_key=True, default=lambda: prefixed_id("mem")
+    )
+    call_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    business_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    lead_id: Mapped[Optional[str]] = mapped_column(String(32))
+    language: Mapped[str] = mapped_column(String(16), nullable=False, default="en")
+    customer_intent: Mapped[Optional[str]] = mapped_column(String(64))
+    questions_answered: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    qualification_fields: Mapped[Dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict
+    )
+    pending_qualification_keys: Mapped[list] = mapped_column(
+        JSON, nullable=False, default=list
+    )
+    handoff_status: Mapped[str] = mapped_column(String(32), nullable=False, default="none")
+    opt_out_detected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    turns_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_customer_question: Mapped[Optional[str]] = mapped_column(Text)
+    last_agent_answer: Mapped[Optional[str]] = mapped_column(Text)
+    memory_metadata: Mapped[Dict[str, Any]] = mapped_column(
+        "memory_metadata", JSON, nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )

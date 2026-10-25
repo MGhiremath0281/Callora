@@ -2,6 +2,7 @@
 
     POST /api/v1/voice/webhooks/bolna/execution      call lifecycle events
     POST /api/v1/voice/webhooks/bolna/pre-transfer   warm-transfer events
+    POST /api/v1/voice/webhooks/bolna/followup       live follow-up question & tool events
 
 These endpoints are **not** protected by the ``X-API-Key`` header: the
 caller is the voice provider, not a tenant. They are protected by the
@@ -96,6 +97,34 @@ async def receive_pre_transfer_event(
         if callable(close):
             close()
     return result.to_dict()
+
+
+@router.post("/followup", status_code=status.HTTP_200_OK)
+async def receive_followup_event(
+    request: Request,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    """Handle a mid-call follow-up question or custom tool webhook from Bolna.
+
+    Does not require an X-API-Key header since the caller is the voice provider
+    runtime. Matches the active call using the provider execution ID or call ID,
+    queries verified business knowledge, evaluates AI guardrails, updates memory,
+    and returns a spoken answer formatted directly for Bolna voice synthesis.
+    """
+    raw_body = await request.body()
+    payload = await _json_body(request)
+    provider = build_provider(settings=settings)
+    service = WebhookService(settings, db, provider)
+    try:
+        result = service.process_followup_event(
+            payload, headers=_headers(request), raw_body=raw_body
+        )
+    finally:
+        close = getattr(provider, "close", None)
+        if callable(close):
+            close()
+    return result
 
 
 __all__ = ["router", "WebhookSignatureError"]

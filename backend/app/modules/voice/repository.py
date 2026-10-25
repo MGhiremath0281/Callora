@@ -10,6 +10,7 @@ PostgreSQL and SQLite.
 """
 
 from datetime import datetime, time, timedelta, timezone
+import re
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -26,6 +27,7 @@ from app.modules.voice.constants import (
 from app.modules.voice.models import (
     AuditLog,
     Business,
+    BusinessKnowledgeItem,
     Call,
     CallEvent,
     CallOutcome,
@@ -33,6 +35,7 @@ from app.modules.voice.models import (
     ConsentRecord,
     DndEntry,
     Handoff,
+    VoiceCallMemory,
     VoiceLeadProfile,
     prefixed_id,
     utcnow,
@@ -736,3 +739,272 @@ def count_handoffs(
 def sum_call_cost(session: Session, business_id: str) -> float:
     stmt = select(func.coalesce(func.sum(Call.cost), 0)).where(Call.business_id == business_id)
     return float(session.execute(stmt).scalar_one() or 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Business Knowledge Base
+# ---------------------------------------------------------------------------
+
+
+def create_knowledge_item(
+    session: Session,
+    item: BusinessKnowledgeItem,
+) -> BusinessKnowledgeItem:
+    session.add(item)
+    session.flush()
+    return item
+
+
+def get_knowledge_item(
+    session: Session,
+    business_id: str,
+    item_id: str,
+) -> Optional[BusinessKnowledgeItem]:
+    stmt = select(BusinessKnowledgeItem).where(
+        BusinessKnowledgeItem.id == item_id,
+        BusinessKnowledgeItem.business_id == business_id,
+    )
+    return session.execute(stmt).scalars().first()
+
+
+def list_knowledge_items(
+    session: Session,
+    business_id: str,
+    category: Optional[str] = None,
+    is_active: Optional[bool] = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> List[BusinessKnowledgeItem]:
+    stmt = (
+        select(BusinessKnowledgeItem)
+        .where(BusinessKnowledgeItem.business_id == business_id)
+    )
+    if category is not None:
+        stmt = stmt.where(BusinessKnowledgeItem.category == category)
+    if is_active is not None:
+        stmt = stmt.where(BusinessKnowledgeItem.is_active.is_(is_active))
+    stmt = stmt.order_by(
+        BusinessKnowledgeItem.priority.desc(),
+        BusinessKnowledgeItem.created_at.desc(),
+    ).limit(limit).offset(offset)
+    return list(session.execute(stmt).scalars().all())
+
+
+def update_knowledge_item(
+    session: Session,
+    item: BusinessKnowledgeItem,
+    values: Dict[str, Any],
+) -> BusinessKnowledgeItem:
+    for key, value in values.items():
+        if hasattr(item, key):
+            setattr(item, key, value)
+    item.updated_at = now_utc()
+    session.flush()
+    return item
+
+
+def delete_knowledge_item(
+    session: Session,
+    item: BusinessKnowledgeItem,
+) -> None:
+    session.delete(item)
+    session.flush()
+
+
+STOP_WORDS = frozenset(
+    {
+        "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+        "have", "has", "had", "do", "does", "did", "to", "at", "in", "on", "by",
+        "for", "with", "about", "against", "between", "into", "through", "during",
+        "before", "after", "above", "below", "from", "up", "down", "out", "off",
+        "over", "under", "again", "further", "then", "once", "here", "there",
+        "when", "where", "why", "how", "all", "any", "both", "each", "few",
+        "more", "most", "other", "some", "such", "no", "nor", "not", "only",
+        "own", "same", "so", "than", "too", "very", "can", "will", "just",
+        "should", "now", "i", "me", "my", "we", "our", "you", "your", "he",
+        "him", "his", "she", "her", "it", "its", "they", "them", "their",
+        "what", "which", "who", "whom", "this", "that", "these", "those",
+        "much", "many", "tell", "need", "get", "like", "want", "would", "could", "also", "per",
+    }
+)
+
+
+def _norm_token(w: str) -> str:
+    w = w.lower()
+    for s in ("ations", "ation", "ments", "ment", "ing", "ies", "es", "ed", "s"):
+        if w.endswith(s) and len(w) - len(s) >= 3:
+            return w[:-len(s)]
+    return w
+
+
+def _token_matches(tok: str, target: str) -> bool:
+    tok = tok.lower()
+    target = target.lower()
+    if tok == target:
+        return True
+    if len(tok) >= 3 and len(target) >= 3:
+        if tok in target or target in tok:
+            return True
+        if _norm_token(tok) == _norm_token(target):
+            return True
+    return False
+
+
+def search_knowledge_items(
+    session: Session,
+    business_id: str,
+    query: str,
+    category: Optional[str] = None,
+    top_k: int = 5,
+) -> List[Tuple[BusinessKnowledgeItem, float]]:
+    """Retrieve and score knowledge items for a query scoped strictly to one business.
+
+    Matches against title, content, tags, and category, and boosts by priority.
+    Returns sorted list of (item, relevance_score) pairs.
+    """
+    items = list_knowledge_items(
+        session, business_id=business_id, category=category, is_active=True, limit=200
+    )
+    if not items:
+        return []
+
+    query_lower = query.lower().strip()
+    raw_tokens = re.findall(r"\b[a-z0-9%]+(?:-[a-z0-9%]+)*\b", query_lower)
+    content_tokens = [t for t in raw_tokens if t not in STOP_WORDS and len(t) > 1]
+    if not content_tokens:
+        content_tokens = [t for t in raw_tokens if len(t) > 1]
+    if not content_tokens:
+        return []
+
+    scored: List[Tuple[BusinessKnowledgeItem, float]] = []
+
+    for item in items:
+        title_lower = (item.title or "").lower()
+        content_lower = (item.content or "").lower()
+        title_words = re.findall(r"\b[a-z0-9%]+(?:-[a-z0-9%]+)*\b", title_lower)
+        content_words = re.findall(r"\b[a-z0-9%]+(?:-[a-z0-9%]+)*\b", content_lower)
+        tags_clean = [str(t).lower().strip() for t in (item.tags or [])]
+
+        score = 0.0
+        matched_tokens = set()
+        tag_matched = False
+
+        # Tag matches
+        for tag in tags_clean:
+            if not tag:
+                continue
+            if tag in query_lower:
+                score += 10.0
+                tag_matched = True
+                matched_tokens.update(re.findall(r"\b[a-z0-9%]+\b", tag))
+            for tok in content_tokens:
+                if _token_matches(tok, tag):
+                    score += 8.0
+                    tag_matched = True
+                    matched_tokens.add(tok)
+
+        # Title token matches
+        for tok in content_tokens:
+            for tw in title_words:
+                if _token_matches(tok, tw):
+                    score += 7.0
+                    matched_tokens.add(tok)
+
+        # Content token matches
+        for tok in content_tokens:
+            for cw in content_words:
+                if _token_matches(tok, cw):
+                    score += 3.0
+                    matched_tokens.add(tok)
+
+        # Exact query match
+        if query_lower in title_lower:
+            score += 15.0
+        elif query_lower in content_lower:
+            score += 10.0
+
+        if score > 0:
+            overlap = len(matched_tokens & set(content_tokens))
+            coverage = overlap / len(content_tokens)
+
+            # Strict anti-hallucination coverage guard:
+            # If no tag matched, require coverage >= 0.25
+            if not tag_matched and (len(content_tokens) >= 3 and coverage < 0.25):
+                continue
+            # For longer queries with unknown terms, prevent wild hallucination
+            if len(content_tokens) >= 5 and coverage < 0.20:
+                continue
+
+            # Priority boost only when keywords match
+            score += max(0, min(item.priority, 10)) * 0.3
+            norm_score = min((score / 22.0) * (0.4 + 0.6 * coverage), 1.0)
+            norm_score = round(norm_score, 2)
+            if norm_score >= 0.2:
+                scored.append((item, norm_score))
+
+    scored.sort(key=lambda pair: pair[1], reverse=True)
+    return scored[:top_k]
+
+
+
+# ---------------------------------------------------------------------------
+# Call Memory
+# ---------------------------------------------------------------------------
+
+
+def get_call_memory(
+    session: Session,
+    call_id: str,
+) -> Optional[VoiceCallMemory]:
+    stmt = select(VoiceCallMemory).where(VoiceCallMemory.call_id == call_id)
+    return session.execute(stmt).scalars().first()
+
+
+def get_or_create_call_memory(
+    session: Session,
+    business_id: str,
+    call_id: str,
+    lead_id: Optional[str] = None,
+    language: str = "en",
+) -> VoiceCallMemory:
+    memory = get_call_memory(session, call_id)
+    if memory is not None:
+        return memory
+
+    business = get_business(session, business_id)
+    pending_keys: List[str] = []
+    if business is not None and business.qualification_questions:
+        for q in business.qualification_questions:
+            if isinstance(q, dict) and q.get("key"):
+                pending_keys.append(str(q["key"]))
+
+    memory = VoiceCallMemory(
+        id=prefixed_id("mem"),
+        call_id=call_id,
+        business_id=business_id,
+        lead_id=lead_id,
+        language=language,
+        questions_answered=[],
+        qualification_fields={},
+        pending_qualification_keys=pending_keys,
+        handoff_status="none",
+        opt_out_detected=False,
+        turns_count=0,
+        memory_metadata={},
+    )
+    session.add(memory)
+    session.flush()
+    return memory
+
+
+def update_call_memory(
+    session: Session,
+    memory: VoiceCallMemory,
+    updates: Dict[str, Any],
+) -> VoiceCallMemory:
+    for key, value in updates.items():
+        if hasattr(memory, key):
+            setattr(memory, key, value)
+    memory.updated_at = now_utc()
+    session.flush()
+    return memory
