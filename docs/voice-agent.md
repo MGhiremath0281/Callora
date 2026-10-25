@@ -723,6 +723,20 @@ Outbound voice sales calls frequently encounter follow-up customer inquiries (e.
 - `objection_handling`: Value propositions, competitor differentiators, cost comparisons.
 - `escalation_rule`: Criteria for live warm transfers and callbacks.
 
+#### Pan-India Knowledge Base Coverage
+Callora includes a comprehensive pan-India knowledge base out of the box (`backend/scripts/seed_knowledge.py`), verified for real estate enterprises (such as UrbanNest Realty) and pan-India sales organizations:
+- **South India Hubs**: Bengaluru (Whitefield, Sarjapur, Electronic City, Manyata, Devanahalli), Hyderabad (HITEC City, Gachibowli, Financial District, Jubilee Hills), Chennai (OMR, Anna Nagar, ECR), Kochi (Marine Drive, Kakkanad InfoPark).
+- **West India Hubs**: Mumbai MMR (Worli, Bandra West, Andheri, Powai, Thane, Navi Mumbai), Pune (Hinjawadi IT Park, Wakad, Baner, Kharadi), Ahmedabad & GIFT City Gandhinagar.
+- **North India Hubs**: Delhi NCR (Gurugram Golf Course Ext & Dwarka Expressway, Noida Sector 62 & 150), Chandigarh Tri-City (Mohali IT City, Panchkula), Jaipur (Jagatpura, Vaishali Nagar), Lucknow (Gomti Nagar Extension, Shaheed Path).
+- **East & Central India Hubs**: Kolkata (New Town Rajarhat, Salt Lake Sector V, EM Bypass), Bhubaneswar (Infocity, Patia), Indore (Super Corridor, Vijay Nagar).
+- **Commercial & Co-working Corridors**: Grade-A commercial office suites across BKC Mumbai, Cyber City Gurugram, Outer Ring Road Bengaluru, and HITEC City Hyderabad.
+- **Pan-India Banking & Home Loans**: Pre-approvals across SBI, HDFC Bank, ICICI Bank, Axis Bank (interest rates from 8.35% p.a., up to 90% financing) and PMAY subsidy guidance (up to ₹2.67 Lakhs).
+- **Pan-India RERA & Legal Approvals**: 100% state RERA registration across MahaRERA, K-RERA, UP-RERA, HRERA, TS-RERA, TNRERA, and WBRERA with escrow protections and state stamp duty guidelines.
+- **Pan-India NRI Investment Desk**: FEMA/RBI compliant advisory, NRE/NRO accounts, Power of Attorney documentation, and 360-degree virtual property tours for Gulf/US/UK/European buyers.
+- **Customer Amenities & Transport**: Complimentary chauffeur-driven site visit pickups and drop-offs across all major metro corridors.
+- **Multilingual Regional Voice Support**: Conversational voice AI code-switching in English, Hindi, Kannada, Tamil, Telugu, Marathi, and Bengali.
+- **Telecom & Calling Window Compliance**: Strict adherence to TRAI 9:00 AM – 8:00 PM IST calling hours, National DND registry checks, and instant verbal opt-out processing.
+
 #### Follow-Up Answering API: `POST /api/v1/voice/answer-question`
 
 Validates business and call context, performs tenant-isolated knowledge retrieval, evaluates AI guardrails, updates conversation memory, and returns grounded spoken telephone answers.

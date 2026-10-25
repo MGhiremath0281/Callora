@@ -24,23 +24,30 @@ CATEGORY_HINTS = {
         "price", "pricing", "cost", "rate", "fee", "plan", "subscription",
         "cheap", "inr", "rupees", "dollar", "payment", "discount", "lakh", "crore", "budget",
         "quote", "charge", "billing", "how much", "tier", "starter", "professional", "enterprise",
-        "कीमत", "लाख", "करोड़", "बजट", "दाम"
+        "loan", "home loan", "interest", "bank", "sbi", "hdfc", "icici", "axis", "emi", "mortgage", "pre-approved",
+        "कीमत", "लाख", "करोड़", "बजट", "दाम", "लोन", "ब्याज"
     ],
     KnowledgeCategory.PRODUCT_FEATURE: [
         "feature", "support", "integrate", "integration", "api", "tool",
         "dashboard", "mobile", "app", "export", "sync", "automation",
-        "webhook", "capacity", "platform", "capability", "languages", "hindi", "kannada",
-        "property", "properties", "flat", "apartment", "villa", "plot", "bhk", "1bhk", "2bhk", "3bhk",
-        "available", "availability", "inventory", "bengaluru", "bangalore", "location", "city",
-        "प्रॉपर्टी", "फ्लैट", "उपलब्ध", "बेंगलुरु", "बैंगलोर"
+        "webhook", "capacity", "platform", "capability", "languages", "hindi", "kannada", "tamil", "telugu", "marathi", "bengali",
+        "property", "properties", "flat", "apartment", "villa", "plot", "bhk", "1bhk", "2bhk", "3bhk", "4bhk", "penthouse",
+        "available", "availability", "inventory", "location", "city",
+        "bengaluru", "bangalore", "mumbai", "bombay", "delhi", "gurugram", "gurgaon", "noida", "hyderabad", "chennai", "madras",
+        "pune", "kolkata", "calcutta", "ahmedabad", "jaipur", "lucknow", "kochi", "cochin", "kerala", "bhubaneswar", "indore",
+        "chandigarh", "mohali", "panchkula", "gift city", "whitefield", "sarjapur", "hitec", "gachibowli", "bandra", "worli",
+        "powai", "thane", "omr", "hinjawadi", "nri", "site visit", "pickup", "cab", "tour", "mivan", "commercial", "green building",
+        "प्रॉपर्टी", "फ्लैट", "उपलब्ध", "बेंगलुरु", "बैंगलोर", "मुंबई", "दिल्ली", "हैदराबाद", "पुणे", "चेन्नई", "कोलकाता", "अहमदाबाद", "जयपुर", "लखनऊ"
     ],
     KnowledgeCategory.POLICY: [
         "refund", "cancel", "cancellation", "privacy", "security", "sla",
-        "guarantee", "terms", "contract", "return", "data protection", "warranty", "maintenance"
+        "guarantee", "terms", "contract", "return", "data protection", "warranty", "maintenance",
+        "rera", "maharera", "stamp duty", "registration", "trai", "tcccpr", "dnd", "escrow", "title", "dpdp", "calling hours"
     ],
     KnowledgeCategory.ELIGIBILITY: [
         "eligible", "eligibility", "qualify", "requirement", "prerequisite",
-        "minimum", "criteria", "limit", "who can", "hardware", "server", "browser", "rooftop", "roof"
+        "minimum", "criteria", "limit", "who can", "hardware", "server", "browser", "rooftop", "roof",
+        "pmay", "subsidy", "first-time buyer", "ews", "lig", "mig"
     ],
     KnowledgeCategory.OBJECTION_HANDLING: [
         "competitor", "already have", "using", "too high", "why should", "why choose",

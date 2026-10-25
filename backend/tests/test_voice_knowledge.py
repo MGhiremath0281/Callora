@@ -172,3 +172,53 @@ class TestKnowledgeSearch:
         # Querying BIZ_1 for "solar" returns empty even though BIZ_2 has solar item
         results = repo.search_knowledge_items(db, business_id=BIZ_1, query="solar package")
         assert len(results) == 0
+
+    def test_search_pan_india_regional_coverage(self, db, voice_business):
+        """Test searching pan-India real estate, banking, and regulatory knowledge items."""
+        mumbai = BusinessKnowledgeItem(
+            business_id=BIZ_1,
+            category=KnowledgeCategory.PRODUCT_FEATURE,
+            title="Mumbai MMR Property Inventory",
+            content="Luxury 2BHK and 3BHK residences in Mumbai starting from ₹1.4 Crores in Andheri and Powai.",
+            tags=["property", "flat", "mumbai", "andheri", "powai", "bandra"],
+            source_reference="UrbanNest Mumbai Catalog",
+            is_active=True,
+            priority=10,
+        )
+        delhi = BusinessKnowledgeItem(
+            business_id=BIZ_1,
+            category=KnowledgeCategory.PRODUCT_FEATURE,
+            title="Delhi NCR Property Inventory",
+            content="Luxury 3BHK residences in Gurugram Golf Course Extension and Noida Expressway from ₹75 Lakhs.",
+            tags=["property", "delhi", "gurugram", "gurgaon", "noida", "3bhk"],
+            source_reference="UrbanNest Delhi Catalog",
+            is_active=True,
+            priority=10,
+        )
+        rera = BusinessKnowledgeItem(
+            business_id=BIZ_1,
+            category=KnowledgeCategory.POLICY,
+            title="Pan-India RERA Clearances and Approvals",
+            content="100% compliant and registered with MahaRERA, K-RERA, and UP-RERA.",
+            tags=["rera", "maharera", "k-rera", "up-rera", "compliance", "legal"],
+            source_reference="UrbanNest Compliance Manual",
+            is_active=True,
+            priority=10,
+        )
+        db.add_all([mumbai, delhi, rera])
+        db.commit()
+
+        # Query Mumbai
+        res_mumbai = repo.search_knowledge_items(db, business_id=BIZ_1, query="Do you have flats in Mumbai or Andheri?")
+        assert len(res_mumbai) > 0
+        assert res_mumbai[0][0].title == "Mumbai MMR Property Inventory"
+
+        # Query Delhi NCR / Gurgaon
+        res_delhi = repo.search_knowledge_items(db, business_id=BIZ_1, query="Apartments in Gurgaon and Noida")
+        assert len(res_delhi) > 0
+        assert res_delhi[0][0].title == "Delhi NCR Property Inventory"
+
+        # Query RERA
+        res_rera = repo.search_knowledge_items(db, business_id=BIZ_1, query="Is this project MahaRERA approved?")
+        assert len(res_rera) > 0
+        assert res_rera[0][0].title == "Pan-India RERA Clearances and Approvals"
