@@ -30,6 +30,7 @@ intake, the durable background job queue and the post-call AI workflow.
 | 5 — Priority scoring | Ranks recovery cases 0–100 with a full factor breakdown | `backend/app/modules/recovery_agent` |
 | — Recovery dashboard | Operator-facing views, AI outreach content, persisted outcomes | `backend/app/modules/recovery_dashboard` |
 | **6 — Outbound voice agent** | **Call orchestration, compliance gate, webhooks, post-call AI, human handoff** | `backend/app/modules/voice` |
+| **7 — Analytics agent** | **Conversation analytics, sales leakage detection, recovery & performance KPIs, cost-revenue analysis, dashboard** | `backend/app/modules/analytics_agent` |
 
 ---
 

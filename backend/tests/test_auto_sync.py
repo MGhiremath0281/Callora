@@ -131,9 +131,15 @@ class TestRouteRegistration:
         ops = _business_operations()
         # Module 1-5: leads, imports, CRM, agent leads, recovery agent
         # and recovery dashboard.
-        legacy_ops = {op for op in ops if not op[1].startswith("/api/v1/voice/")}
+        legacy_ops = {
+            op for op in ops
+            if not op[1].startswith("/api/v1/voice/") and not op[1].startswith("/api/v1/analytics/")
+        }
         # Module 6: the outbound voice agent + knowledge base & follow-up Q&A.
         voice_ops = {op for op in ops if op[1].startswith("/api/v1/voice/")}
+        # Module 7: the analytics agent (sales leakage, conversations, summary, dashboard).
+        analytics_ops = {op for op in ops if op[1].startswith("/api/v1/analytics/")}
+
         assert len(legacy_ops) == 20, (
             f"Expected 20 non-voice operations, got {len(legacy_ops)}: "
             f"{sorted(legacy_ops)}"
@@ -142,7 +148,11 @@ class TestRouteRegistration:
             f"Expected 40 voice operations, got {len(voice_ops)}: "
             f"{sorted(voice_ops)}"
         )
-        assert len(ops) == 60, f"Expected 60 operations, got {len(ops)}: {sorted(ops)}"
+        assert len(analytics_ops) == 4, (
+            f"Expected 4 analytics operations, got {len(analytics_ops)}: "
+            f"{sorted(analytics_ops)}"
+        )
+        assert len(ops) == 64, f"Expected 64 operations, got {len(ops)}: {sorted(ops)}"
 
     def test_no_unversioned_leads_routes(self):
         """No unversioned /leads or /imports routes exist."""
@@ -183,6 +193,10 @@ class TestRouteRegistration:
             ("GET", "/api/v1/agent/recovery/cases/{case_id}/outreach-content"),
             ("POST", "/api/v1/agent/recovery/cases/{case_id}/outreach-content/generate"),
             ("GET", "/api/v1/agent/recovery/cases/{case_id}/outcomes"),
+            ("GET", "/api/v1/analytics/summary"),
+            ("GET", "/api/v1/analytics/leakage"),
+            ("GET", "/api/v1/analytics/conversations"),
+            ("GET", "/api/v1/analytics/dashboard"),
         }
         assert required.issubset(ops), f"Missing: {required - ops}"
 

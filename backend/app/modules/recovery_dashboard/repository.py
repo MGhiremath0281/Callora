@@ -256,6 +256,11 @@ def dashboard_summary(session: Session, business_id: str) -> Dict[str, Any]:
             "total_scored": int(total_scored),
             "ranking_order": "priority_score desc, score desc, case_id asc",
         },
+        "analytics": {
+            "recovery_rate_pct": round((recovered_exec / total_cases) * 100.0, 1) if total_cases > 0 else 0.0,
+            "leakage_mitigated": int(recovered_exec),
+            "analytics_dashboard_url": "/analytics/dashboard",
+        },
     }
 
 
