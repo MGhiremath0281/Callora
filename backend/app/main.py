@@ -24,6 +24,7 @@ from app.modules.crm_sync import connection_seed
 from app.modules.crm_sync import router as crm_sync_api
 from app.modules.recovery_agent import router as recovery_agent_api
 from app.modules.recovery_dashboard import router as recovery_dashboard_api
+from app.modules.recommendation_agent import router as recommendation_agent_api
 from app.modules.voice.api import businesses as voice_businesses_api
 from app.modules.voice.api import calls as voice_calls_api
 from app.modules.voice.api import followup as voice_followup_api
@@ -88,6 +89,9 @@ app.include_router(voice_ops_api.router, prefix=API_PREFIX)
 app.include_router(voice_webhooks_api.router, prefix=API_PREFIX)
 app.include_router(voice_knowledge_api.router, prefix=API_PREFIX)
 app.include_router(voice_followup_api.router, prefix=API_PREFIX)
+
+# Recommendation Agent
+app.include_router(recommendation_agent_api.router, prefix=API_PREFIX)
 
 
 @app.get("/")
