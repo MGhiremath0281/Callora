@@ -13,6 +13,7 @@ from app.config import get_settings
 from app.db.base import Base
 from app import models  # noqa: F401  (register all tables on Base.metadata)
 from app.modules.voice import models as voice_models  # noqa: F401  (voice tables)
+from app.modules.recommendation_agent import models as recommendation_agent_models  # noqa: F401  (recommendation agent tables)
 
 config = context.config
 
