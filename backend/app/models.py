@@ -472,3 +472,8 @@ class RecoveryOutreachEvent(Base):
 # consumer (Alembic autogenerate, the test fixtures, ``create_all``)
 # regardless of which module was imported first.
 from app.modules.voice import models as voice_models  # noqa: E402,F401
+
+# ---------------------------------------------------------------------------
+# Recommendation Agent
+# ---------------------------------------------------------------------------
+from app.modules.recommendation_agent import models as recommendation_agent_models  # noqa: E402,F401
