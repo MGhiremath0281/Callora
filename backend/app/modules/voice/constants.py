@@ -347,6 +347,10 @@ class JobType:
     POSTCALL_PROCESS = "postcall.process"
     #: Reconcile the status of calls the provider has not reported on.
     STATUS_SYNC = "status.sync"
+    #: Dispatch a requested callback through the compliance gate when it
+    #: becomes due. Only created when automatic callback dispatch is
+    #: enabled for the deployment.
+    CALLBACK_DISPATCH = "callback.dispatch"
 
 
 class JobStatus:
@@ -384,6 +388,17 @@ class AuditAction:
     FOLLOWUP_CLARIFY = "followup.clarify"
     FOLLOWUP_ESCALATED = "followup.escalated"
     CUSTOMER_OPT_OUT = "customer.opt_out"
+    # Bolna custom functions (live tool calls into Callora)
+    TOOL_LEAD_READ = "tool.lead_read"
+    TOOL_OUTCOME_SAVED = "tool.outcome_saved"
+    TOOL_QUALIFICATION = "tool.qualification"
+    TOOL_OPPORTUNITY = "tool.opportunity"
+    TOOL_CALLBACK = "tool.callback"
+    TOOL_CRM_SYNC = "tool.crm_sync"
+    TOOL_STATUS_PRESERVED = "tool.status_preserved"
+    TOOL_UNAUTHORIZED = "tool.unauthorized"
+    CALLBACK_DISPATCHED = "callback.dispatched"
+    OUTCOME_CONFLICT = "outcome.conflict"
 
 
 class KnowledgeCategory:

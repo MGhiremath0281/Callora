@@ -707,3 +707,76 @@ CHECK_NAMES: List[str] = [
     "concurrency",
     "provider_ready",
 ]
+
+
+def evaluate_callback_request(
+    settings: Settings,
+    session: Session,
+    business: Business,
+    lead: Optional[Lead],
+    requested_at: datetime,
+    dnd_lookup: Optional[DndLookup] = None,
+) -> ComplianceEvaluation:
+    """Evaluate the rules that govern a *requested* callback time.
+
+    A callback the customer asks for is not permission to ignore consent,
+    DND or the calling window. This reuses exactly the gate's consent, DND
+    and calling-hours checks — evaluated at the requested moment (the
+    context's ``now`` is the requested time, so the window check sees the
+    hour the callback would actually happen) instead of the current time.
+
+    The immediate-call checks (duplicate call, quotas, concurrency,
+    provider readiness) are intentionally absent: nothing is being placed
+    right now. When automatic callback dispatch is enabled the full gate
+    runs again at dispatch time through the orchestrator.
+    """
+    gate = ComplianceGate(settings, session, dnd_lookup=dnd_lookup)
+    profile = (
+        repo.get_lead_profile(session, business.id, lead.id) if lead is not None else None
+    )
+    ctx = ComplianceContext(
+        business=business,
+        lead=lead,
+        # No provider is involved in a callback *request* — the context
+        # carries none, and none of the three checks below touches it.
+        provider=None,  # type: ignore[arg-type]
+        now=requested_at,
+        profile=profile,
+        phone=normalize_phone(lead.phone) if lead is not None else None,
+        simulated=True,
+    )
+    checks: List[CheckResult] = []
+    for name, check in (
+        ("consent", gate._check_consent),
+        ("dnd", gate._check_dnd),
+        ("calling_hours", gate._check_calling_hours),
+    ):
+        try:
+            result = check(ctx)
+        except Exception as exc:  # fail closed
+            audit_logger.exception("callback_check_failed", extra={"check": name})
+            result = CheckResult(
+                name=name,
+                outcome=CheckOutcome.ERROR,
+                mandatory=True,
+                reason_code=ReasonCode.CHECK_UNAVAILABLE,
+                reason=f"the '{name}' check could not be completed: {exc}",
+                details={"error": str(exc)},
+            )
+        checks.append(result)
+    blocked = [c for c in checks if c.mandatory and not c.passed]
+    decision = (
+        ComplianceDecision.BLOCKED if blocked else ComplianceDecision.ALLOWED
+    )
+    evaluation = ComplianceEvaluation(decision=decision, checks=checks)
+    if not evaluation.allowed:
+        logger.info(
+            "callback_request_blocked",
+            extra={
+                "business_id": business.id,
+                "reasons": ",".join(
+                    r.get("reason_code") or "unknown" for r in evaluation.blocked_reasons
+                ),
+            },
+        )
+    return evaluation

@@ -362,6 +362,31 @@ class Settings(BaseSettings):
     # Maximum transcript size (characters) handed to the post-call LLM.
     voice_transcript_max_chars: int = Field(default=40_000, ge=500, le=400_000)
 
+    # --- Recovery workflow execution ------------------------------------
+    # Maximum number of approved/running/paused workflow runs per business.
+    workflow_max_active_runs: int = Field(default=20, ge=1, le=10_000)
+    # Anti-duplicate gap between two non-voice workflow contacts (seconds).
+    # 0 disables the message cooldown; consent/DND rules always remain.
+    workflow_message_cooldown_seconds: int = Field(default=3600, ge=0, le=604_800)
+    # A workflow run may only execute without explicit approval when the
+    # business has switched this on AND the action is a dry run or an
+    # internal, non-outbound step. Real outbound calls/messages always
+    # require approval, regardless of this flag.
+    workflow_allow_unapproved_internal: bool = False
+    # Reminder delivery adapters. "none" reports channel_not_configured
+    # instead of pretending a reminder was sent.
+    reminder_delivery_provider: str = "none"
+    # Calendar booking provider. "internal" records a Callora-owned
+    # appointment; external providers are only confirmed on a real
+    # provider response with an event id.
+    booking_provider: str = "internal"
+    # Minimum observed call outcomes per window before analytics reports a
+    # rate comparison as sufficient.
+    analytics_min_sample_per_window: int = Field(default=5, ge=1, le=10_000)
+    # Leakage analytics need at least this many analysed calls before any
+    # leakage percentage is reported.
+    analytics_min_calls_for_leakage: int = Field(default=10, ge=1, le=100_000)
+
     # --- Post-call AI workflow (LangGraph) -------------------------------
     # "groq" uses the Groq chat model through LangChain; "langchain" uses
     # whatever LangChain chat model is configured; "null" disables the LLM
@@ -374,6 +399,21 @@ class Settings(BaseSettings):
     # as permanently failed.
     voice_job_max_attempts: int = Field(default=5, ge=1, le=50)
     voice_job_retry_backoff_seconds: float = Field(default=10.0, ge=0.0, le=3_600.0)
+
+    # --- Bolna custom functions (mid-call tools) --------------------------
+    # Shared secret the Bolna runtime presents as "Authorization: Bearer
+    # <token>" on /api/v1/voice/tools/*. An empty value disables the tool
+    # endpoints entirely (401 on every request) — the app runs fine without
+    # the integration configured. Business API keys from CALLORA_API_KEYS
+    # are accepted on the same endpoints as an operator path.
+    voice_tool_secret: str = ""
+    voice_tool_rate_limit_per_minute: int = Field(default=120, ge=1, le=10_000)
+    # Whether a scheduled callback automatically enqueues a dispatch job
+    # (which re-runs the full compliance gate before dialing). Default off:
+    # without it callbacks are recorded for the team to action manually.
+    voice_auto_callback_dispatch: bool = False
+    voice_callback_max_days_ahead: int = Field(default=30, ge=1, le=365)
+    voice_qualification_min_score: float = Field(default=0.6, ge=0.0, le=1.0)
 
     # --- Derived helpers -----------------------------------------------
 

@@ -18,7 +18,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.models import IdempotencyKey, Lead
+from app.models import AgentLead, IdempotencyKey, Lead
 from app.modules.voice.constants import (
     ATTEMPTED_STATUSES,
     IN_FLIGHT_STATUSES,
@@ -37,6 +37,7 @@ from app.modules.voice.models import (
     Handoff,
     VoiceCallMemory,
     VoiceLeadProfile,
+    VoiceOpportunity,
     prefixed_id,
     utcnow,
 )
@@ -657,6 +658,11 @@ def add_audit_log(
     reason: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
 ) -> AuditLog:
+    from app.audit import compute_entry_hash, last_audit_hash
+
+    created_at = datetime.now(timezone.utc)
+    metadata = metadata or {}
+    previous_hash = last_audit_hash(session, business_id)
     entry = AuditLog(
         id=prefixed_id("aud"),
         business_id=business_id,
@@ -667,7 +673,22 @@ def add_audit_log(
         decision=decision,
         reason_code=reason_code,
         reason=reason,
-        audit_metadata=metadata or {},
+        audit_metadata=metadata,
+        previous_hash=previous_hash,
+        entry_hash=compute_entry_hash(
+            business_id=business_id,
+            actor=actor,
+            action=action,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            decision=decision,
+            reason_code=reason_code,
+            reason=reason,
+            metadata=metadata,
+            created_at=created_at,
+            previous_hash=previous_hash,
+        ),
+        created_at=created_at,
     )
     session.add(entry)
     session.flush()
@@ -1008,3 +1029,125 @@ def update_call_memory(
     memory.updated_at = now_utc()
     session.flush()
     return memory
+
+
+# ---------------------------------------------------------------------------
+# Lead status (AgentLead projection) — used by the Bolna custom functions
+# ---------------------------------------------------------------------------
+
+
+def get_agent_lead(session: Session, lead_id: str) -> Optional[AgentLead]:
+    return session.get(AgentLead, lead_id)
+
+
+def apply_lead_status(
+    session: Session,
+    lead: Lead,
+    new_status: str,
+) -> Tuple[bool, Optional[str]]:
+    """Set the lead status on the ``agent_leads`` projection.
+
+    The projection is the canonical place a lead status lives (Module 1
+    keeps no status on ``leads``; CRM synchronization and the recovery
+    engine read it from here). When no projection row exists yet, one is
+    created from the canonical lead.
+
+    Returns ``(applied, previous_status)``. The caller decides the
+    monotonic rule; this function only stores what it is told to store.
+    """
+    record = session.get(AgentLead, lead.id)
+    previous = None
+    if record is None:
+        record = AgentLead(
+            lead_id=lead.id,
+            business_id=lead.business_id,
+            name=lead.name,
+            phone=lead.phone,
+            email=lead.email,
+            source=lead.source,
+            status=new_status,
+            external_crm_id=lead.external_id,
+            language=lead.language,
+            deal_value=lead.deal_value,
+            last_contact_at=lead.last_contact_at,
+            custom_fields=lead.custom_fields or {},
+            created_at=lead.created_at,
+        )
+        session.add(record)
+        session.flush()
+        return True, None
+    previous = record.status
+    record.status = new_status
+    record.updated_at = now_utc()
+    session.flush()
+    return True, previous
+
+
+def append_lead_custom_fields(
+    session: Session,
+    lead: Lead,
+    values: Dict[str, Any],
+) -> None:
+    """Additively merge voice-generated keys into ``leads.custom_fields``.
+
+    Only missing or voice-owned keys are written; keys set by the import
+    or by the business are never overwritten.
+    """
+    fields = dict(lead.custom_fields or {})
+    fields.update(values)
+    lead.custom_fields = fields
+    session.flush()
+
+
+# ---------------------------------------------------------------------------
+# Voice opportunities
+# ---------------------------------------------------------------------------
+
+
+def get_opportunity_by_event(
+    session: Session, business_id: str, lead_id: str, source_event_key: str
+) -> Optional[VoiceOpportunity]:
+    stmt = select(VoiceOpportunity).where(
+        VoiceOpportunity.business_id == business_id,
+        VoiceOpportunity.lead_id == lead_id,
+        VoiceOpportunity.source_event_key == source_event_key,
+    )
+    return session.execute(stmt).scalars().first()
+
+
+def create_opportunity(
+    session: Session, opportunity: VoiceOpportunity
+) -> VoiceOpportunity:
+    session.add(opportunity)
+    session.flush()
+    return opportunity
+
+
+def list_opportunities(
+    session: Session,
+    business_id: str,
+    lead_id: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> List[VoiceOpportunity]:
+    stmt = select(VoiceOpportunity).where(VoiceOpportunity.business_id == business_id)
+    if lead_id:
+        stmt = stmt.where(VoiceOpportunity.lead_id == lead_id)
+    if status:
+        stmt = stmt.where(VoiceOpportunity.status == status)
+    stmt = stmt.order_by(VoiceOpportunity.created_at.desc()).limit(limit).offset(offset)
+    return list(session.execute(stmt).scalars().all())
+
+
+def get_latest_outcome_for_lead(
+    session: Session, business_id: str, lead_id: str
+) -> Optional[CallOutcome]:
+    """The most recent call outcome recorded for a lead (any call)."""
+    stmt = (
+        select(CallOutcome)
+        .where(CallOutcome.business_id == business_id, CallOutcome.lead_id == lead_id)
+        .order_by(CallOutcome.created_at.desc())
+        .limit(1)
+    )
+    return session.execute(stmt).scalars().first()
