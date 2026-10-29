@@ -477,3 +477,8 @@ from app.modules.voice import models as voice_models  # noqa: E402,F401
 # Recommendation Agent
 # ---------------------------------------------------------------------------
 from app.modules.recommendation_agent import models as recommendation_agent_models  # noqa: E402,F401
+
+# ---------------------------------------------------------------------------
+# Recovery workflow execution layer
+# ---------------------------------------------------------------------------
+from app.modules.recovery_workflow import models as recovery_workflow_models  # noqa: E402,F401
