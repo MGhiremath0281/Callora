@@ -18,6 +18,52 @@ class RecommendationRepository:
         self.db.flush()
         return rec
 
+    def find_open_recommendation(
+        self, business_id: str, category: str
+    ) -> Optional[models.Recommendation]:
+        """An open recommendation of the same category, if one exists.
+
+        Used to suppress duplicates/contradictions: a newly generated
+        recommendation supersedes the still-open one instead of creating
+        two competing suggestions for the same finding.
+        """
+        return (
+            self.db.query(models.Recommendation)
+            .filter(
+                models.Recommendation.business_id == business_id,
+                models.Recommendation.category == category,
+                models.Recommendation.status.in_(
+                    [
+                        models.RecommendationStatus.NEW,
+                        models.RecommendationStatus.REVIEWED,
+                        models.RecommendationStatus.APPROVED,
+                        models.RecommendationStatus.IN_PROGRESS,
+                    ]
+                ),
+            )
+            .order_by(desc(models.Recommendation.created_at))
+            .first()
+        )
+
+    def supersede(self, recommendation: models.Recommendation, *, new_id: str, actor: str = "generator") -> None:
+        """Mark an older recommendation as superseded by ``new_id``."""
+        previous = recommendation.status
+        recommendation.status = models.RecommendationStatus.SUPERSEDED
+        recommendation.superseded_by = new_id
+        recommendation.updated_at = datetime.now(timezone.utc)
+        self.db.add(
+            models.RecommendationAuditLog(
+                recommendation_id=recommendation.id,
+                business_id=recommendation.business_id,
+                actor=actor,
+                action="superseded",
+                from_status=previous,
+                to_status=models.RecommendationStatus.SUPERSEDED,
+                reason=f"superseded by {new_id}",
+            )
+        )
+        self.db.flush()
+
     def get_recommendation(self, business_id: str, recommendation_id: str) -> Optional[models.Recommendation]:
         return self.db.query(models.Recommendation).filter(
             and_(models.Recommendation.id == recommendation_id,
@@ -109,6 +155,65 @@ class RecommendationRepository:
         self.db.add(rrec)
         self.db.flush()
         return rrec
+
+    def next_script_version_number(self, business_id: str) -> int:
+        from sqlalchemy import func
+
+        current = (
+            self.db.query(func.max(models.ScriptVersion.version_number))
+            .filter(models.ScriptVersion.business_id == business_id)
+            .scalar()
+        )
+        return int(current or 0) + 1
+
+    def create_script_version(self, **kwargs) -> models.ScriptVersion:
+        version = models.ScriptVersion(**kwargs)
+        self.db.add(version)
+        self.db.flush()
+        return version
+
+    def list_script_versions(self, business_id: str):
+        return (
+            self.db.query(models.ScriptVersion)
+            .filter(models.ScriptVersion.business_id == business_id)
+            .order_by(desc(models.ScriptVersion.version_number))
+            .all()
+        )
+
+    def get_script_version(self, business_id: str, version_id: str):
+        return (
+            self.db.query(models.ScriptVersion)
+            .filter(
+                models.ScriptVersion.business_id == business_id,
+                models.ScriptVersion.id == version_id,
+            )
+            .first()
+        )
+
+    def activate_script_version(self, business_id: str, version_id: str, actor: str) -> models.ScriptVersion:
+        version = self.get_script_version(business_id, version_id)
+        if version is None:
+            return None
+        self.db.query(models.ScriptVersion).filter(
+            models.ScriptVersion.business_id == business_id,
+            models.ScriptVersion.is_active == True,  # noqa: E712
+        ).update({"is_active": False})
+        version.is_active = True
+        version.approved_by = actor
+        version.approved_at = datetime.now(timezone.utc)
+        self.db.add(
+            models.RecommendationAuditLog(
+                recommendation_id=version.source_suggestion_id or version.id,
+                business_id=business_id,
+                actor=actor,
+                action="script_version_activated",
+                to_status="active",
+                reason=f"script version {version.version_number} activated",
+                audit_metadata={"script_version_id": version.id},
+            )
+        )
+        self.db.flush()
+        return version
 
     def list_recovery_recommendations(self, business_id: str):
         return self.db.query(models.RecoveryRecommendation).filter(
