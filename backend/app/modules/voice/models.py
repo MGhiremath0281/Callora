@@ -221,6 +221,10 @@ class Call(Base):
         "call_metadata", JSON, nullable=False, default=dict
     )
     compliance_decision_id: Mapped[Optional[str]] = mapped_column(String(32))
+    # Campaign / script version attribution (additive, nullable). These
+    # let analytics compare calls made under different script versions.
+    campaign_id: Mapped[Optional[str]] = mapped_column(String(32))
+    script_version_id: Mapped[Optional[str]] = mapped_column(String(32))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
@@ -284,6 +288,10 @@ class CallOutcome(Base):
     model: Mapped[Optional[str]] = mapped_column(String(128))
     engine: Mapped[str] = mapped_column(String(64), nullable=False, default="langgraph")
     raw_response: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    # Per-field confidence and the evidence the post-call workflow used.
+    # Empty means "not produced", never "certain".
+    field_confidence: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    evidence: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     processed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
@@ -369,6 +377,12 @@ class AuditLog(Base):
     audit_metadata: Mapped[Dict[str, Any]] = mapped_column(
         "audit_metadata", JSON, nullable=False, default=dict
     )
+    # Tamper-evident hash chain (additive). ``previous_hash`` is the
+    # ``entry_hash`` of the preceding audit row for the same business and
+    # ``entry_hash`` is SHA-256 over the canonical row content. A missing
+    # hash means the row predates the chain (legacy rows stay valid).
+    previous_hash: Mapped[Optional[str]] = mapped_column(String(64))
+    entry_hash: Mapped[Optional[str]] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
@@ -491,6 +505,69 @@ class VoiceCallMemory(Base):
     memory_metadata: Mapped[Dict[str, Any]] = mapped_column(
         "memory_metadata", JSON, nullable=False, default=dict
     )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+
+# ---------------------------------------------------------------------------
+# Voice-created sales opportunities
+# ---------------------------------------------------------------------------
+#
+# Module 3 (Opportunity Detection) owns *recovery* opportunities
+# (``recovery_cases``): neglected leads detected by the deterministic sweep.
+# A lead qualified during a live voice conversation is a different entity —
+# it must never be written into the recovery pipeline. This table records
+# the sales opportunity the voice agent created, once per (business, lead,
+# qualifying event), with the rule-based qualification result attached.
+
+
+class VoiceOpportunityStatus:
+    OPEN = "open"
+    CONVERTED = "converted"
+    LOST = "lost"
+
+
+class VoiceOpportunity(Base):
+    """One sales opportunity created from a qualified voice conversation."""
+
+    __tablename__ = "voice_opportunities"
+    __table_args__ = (
+        # One opportunity per (business, lead, qualifying event). A retried
+        # Bolna tool call hits this constraint instead of creating a
+        # duplicate; the same lead may legitimately produce several
+        # opportunities across different qualifying conversations.
+        UniqueConstraint(
+            "business_id",
+            "lead_id",
+            "source_event_key",
+            name="uq_voice_opportunities_biz_lead_event",
+        ),
+        Index("ix_voice_opportunities_business_status", "business_id", "status"),
+        Index("ix_voice_opportunities_lead", "lead_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: prefixed_id("vopp"))
+    business_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    lead_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("leads.id", ondelete="CASCADE"), nullable=False
+    )
+    call_id: Mapped[Optional[str]] = mapped_column(String(32))
+    provider_call_id: Mapped[Optional[str]] = mapped_column(String(128))
+    # Stable key of the qualifying event (the Bolna execution id, or a
+    # deterministic fallback) — the deduplication anchor.
+    source_event_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="voice")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="open")
+    # The structured, rule-based qualification result (engine "rules") that
+    # justified the opportunity — never an AI free-text interpretation.
+    qualification_result: Mapped[Dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict
+    )
+    qualification_score: Mapped[Optional[float]] = mapped_column(Numeric(5, 2))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False
     )

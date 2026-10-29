@@ -30,6 +30,7 @@ from typing_extensions import TypedDict
 from app.config import Settings
 from app.modules.voice import repository as repo
 from app.modules.voice.constants import (
+    AuditAction,
     Disposition,
     HandoffKind,
     HandoffStatus,
@@ -395,6 +396,63 @@ class PostCallWorkflow:
                 engine=state.get("engine", "langgraph"),
                 raw_response=state.get("raw") or {},
             )
+
+            # Reconcile with a *live* outcome the voice agent's custom
+            # functions recorded during the conversation. What the live
+            # conversation established (and what the tool endpoint verified
+            # against the persisted lead) is verified information: the
+            # post-call pass may only fill what is still missing, never
+            # overwrite it. A disagreement is audited, not applied.
+            existing = repo.get_outcome(session, call.id)
+            if existing is not None and (existing.field_confidence or {}).get(
+                "source"
+            ) == "live_conversation":
+                conflicts = []
+                if existing.disposition and existing.disposition != outcome.disposition:
+                    conflicts.append(
+                        {
+                            "field": "disposition",
+                            "live": existing.disposition,
+                            "postcall": outcome.disposition,
+                        }
+                    )
+                    outcome.disposition = existing.disposition
+                if existing.summary:
+                    conflicts.append(
+                        {
+                            "field": "summary",
+                            "live": True,
+                            "postcall": bool(outcome.summary),
+                        }
+                    )
+                    outcome.summary = existing.summary
+                if existing.qualified is not None:
+                    outcome.qualified = existing.qualified
+                    outcome.qualification_score = (
+                        existing.qualification_score
+                        if existing.qualification_score is not None
+                        else outcome.qualification_score
+                    )
+                    if existing.qualification_answers:
+                        outcome.qualification_answers = existing.qualification_answers
+                outcome.field_confidence = existing.field_confidence
+                if conflicts:
+                    repo.add_audit_log(
+                        session,
+                        action=AuditAction.OUTCOME_CONFLICT,
+                        business_id=call.business_id,
+                        actor="postcall_workflow",
+                        entity_type="call",
+                        entity_id=call.id,
+                        decision="block",
+                        reason_code="live_outcome_preserved",
+                        reason=(
+                            "the live voice-tool outcome was preserved over "
+                            "the post-call result"
+                        ),
+                        metadata={"call_id": call.id, "conflicts": conflicts},
+                    )
+
             repo.upsert_outcome(session, outcome)
             if call.summary is None and outcome.summary:
                 repo.update_call(session, call, {"summary": outcome.summary})

@@ -130,19 +130,30 @@ class TestRouteRegistration:
         """
         ops = _business_operations()
         # Module 1-5: leads, imports, CRM, agent leads, recovery agent
-        # and recovery dashboard. Recommendation Agent added.
+        # and recovery dashboard. Recommendation Agent added (13 ops —
+        # the earlier router declared /analytics and /recovery twice, so
+        # the unique count grew when each route became single-declared
+        # and evaluate/implement/script-version endpoints were added).
         legacy_ops = {op for op in ops if not op[1].startswith("/api/v1/voice/")}
         # Module 6: the outbound voice agent + knowledge base & follow-up Q&A.
         voice_ops = {op for op in ops if op[1].startswith("/api/v1/voice/")}
-        assert len(legacy_ops) == 29, (
-            f"Expected 29 non-voice operations, got {len(legacy_ops)}: "
-            f"{sorted(legacy_ops)}"
+        # Recovery Workflow (eligibility, rules, runs, appointments,
+        # reminders, analysis, analytics, integrations).
+        workflow_ops = {op for op in ops if op[1].startswith("/api/v1/workflow/")}
+        legacy_only = legacy_ops - workflow_ops
+        assert len(legacy_only) == 33, (
+            f"Expected 33 non-voice operations, got {len(legacy_only)}: "
+            f"{sorted(legacy_only)}"
         )
-        assert len(voice_ops) == 40, (
-            f"Expected 40 voice operations, got {len(voice_ops)}: "
+        assert len(voice_ops) == 47, (
+            f"Expected 47 voice operations, got {len(voice_ops)}: "
             f"{sorted(voice_ops)}"
         )
-        assert len(ops) == 69, f"Expected 69 operations, got {len(ops)}: {sorted(ops)}"
+        assert len(workflow_ops) == 32, (
+            f"Expected 32 workflow operations, got {len(workflow_ops)}: "
+            f"{sorted(workflow_ops)}"
+        )
+        assert len(ops) == 112, f"Expected 112 operations, got {len(ops)}: {sorted(ops)}"
 
     def test_no_unversioned_leads_routes(self):
         """No unversioned /leads or /imports routes exist."""
@@ -183,6 +194,52 @@ class TestRouteRegistration:
             ("GET", "/api/v1/agent/recovery/cases/{case_id}/outreach-content"),
             ("POST", "/api/v1/agent/recovery/cases/{case_id}/outreach-content/generate"),
             ("GET", "/api/v1/agent/recovery/cases/{case_id}/outcomes"),
+            ("GET", "/api/v1/recommendations"),
+            ("GET", "/api/v1/recommendations/analytics"),
+            ("GET", "/api/v1/recommendations/recovery"),
+            ("GET", "/api/v1/recommendations/scripts/versions"),
+            ("GET", "/api/v1/recommendations/{recommendation_id}"),
+            ("GET", "/api/v1/recommendations/{recommendation_id}/evidence"),
+            ("GET", "/api/v1/recommendations/{recommendation_id}/script-suggestions"),
+            ("PATCH", "/api/v1/recommendations/{recommendation_id}/status"),
+            ("POST", "/api/v1/recommendations/generate"),
+            ("POST", "/api/v1/recommendations/scripts/versions/{version_id}/activate"),
+            ("POST", "/api/v1/recommendations/{recommendation_id}/evaluate"),
+            ("POST", "/api/v1/recommendations/{recommendation_id}/implement"),
+            (
+                "POST",
+                "/api/v1/recommendations/{recommendation_id}/script-suggestions"
+                "/{suggestion_id}/approve",
+            ),
+            ("POST", "/api/v1/workflow/eligibility"),
+            ("GET", "/api/v1/workflow/rules"),
+            ("PUT", "/api/v1/workflow/rules"),
+            ("POST", "/api/v1/workflow/rules/evaluate"),
+            ("POST", "/api/v1/workflow/runs"),
+            ("GET", "/api/v1/workflow/runs/{run_id}"),
+            ("POST", "/api/v1/workflow/runs/{run_id}/execute"),
+            ("POST", "/api/v1/workflow/runs/{run_id}/approve"),
+            ("POST", "/api/v1/workflow/runs/{run_id}/pause"),
+            ("POST", "/api/v1/workflow/runs/{run_id}/cancel"),
+            ("GET", "/api/v1/workflow/followups"),
+            ("POST", "/api/v1/workflow/followups/{task_id}/complete"),
+            ("POST", "/api/v1/workflow/appointments"),
+            ("GET", "/api/v1/workflow/appointments"),
+            ("POST", "/api/v1/workflow/appointments/{appointment_id}/cancel"),
+            ("GET", "/api/v1/workflow/reminders"),
+            ("POST", "/api/v1/workflow/reminders/dispatch"),
+            ("POST", "/api/v1/workflow/analysis"),
+            ("POST", "/api/v1/workflow/analysis/bulk"),
+            ("GET", "/api/v1/workflow/analytics/funnel"),
+            ("GET", "/api/v1/workflow/analytics/leakage"),
+            ("GET", "/api/v1/workflow/analytics/roi"),
+            ("POST", "/api/v1/workflow/analytics/record-call-costs"),
+            ("POST", "/api/v1/workflow/outcomes"),
+            ("POST", "/api/v1/workflow/costs"),
+            ("POST", "/api/v1/workflow/revenue"),
+            ("GET", "/api/v1/workflow/integrations"),
+            ("POST", "/api/v1/workflow/integrations"),
+            ("POST", "/api/v1/workflow/integrations/{connection_id}/sync"),
         }
         assert required.issubset(ops), f"Missing: {required - ops}"
 
