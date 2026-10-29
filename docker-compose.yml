@@ -1,4 +1,4 @@
-﻿services:
+services:
   db:
     image: postgres:16-alpine
     container_name: callora-db
@@ -119,6 +119,16 @@
         condition: service_healthy
       redis:
         condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: callora-frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
 
 volumes:
   callora_pgdata:
