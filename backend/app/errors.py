@@ -221,12 +221,28 @@ class OutreachBlockedError(AppError):
 
 
 def register_exception_handlers(app: FastAPI) -> None:
+    #: Tool requests always answer with the flat envelope the voice agent's
+    #: language model reads — never the platform's standard error envelope,
+    #: and never a stack trace or configuration value.
+    tool_prefix = "/api/v1/voice/tools"
+
+    def _is_tool_request(request: Request) -> bool:
+        return request.url.path.startswith(tool_prefix)
+
+    def _tool_payload(code: str, message: str) -> Dict[str, Any]:
+        return {"success": False, "error": {"code": code.upper(), "message": message}}
+
     @app.exception_handler(AppError)
-    async def _app_error_handler(_: Request, exc: AppError):
+    async def _app_error_handler(request: Request, exc: AppError):
+        if _is_tool_request(request):
+            return JSONResponse(
+                status_code=exc.status_code,
+                content=_tool_payload(exc.code, exc.message),
+            )
         return JSONResponse(status_code=exc.status_code, content=exc.to_payload())
 
     @app.exception_handler(RequestValidationError)
-    async def _request_validation_handler(_: Request, exc: RequestValidationError):
+    async def _request_validation_handler(request: Request, exc: RequestValidationError):
         details = [
             {
                 "location": ".".join(str(part) for part in err["loc"]),
@@ -235,6 +251,15 @@ def register_exception_handlers(app: FastAPI) -> None:
             }
             for err in exc.errors()
         ]
+        if _is_tool_request(request):
+            first = details[0]["message"] if details else ""
+            message = "The request body failed validation"
+            if first:
+                message = f"{message}: {first}"
+            return JSONResponse(
+                status_code=422,
+                content=_tool_payload("request_validation_error", message),
+            )
         return JSONResponse(
             status_code=422,
             content={
@@ -252,6 +277,15 @@ def register_exception_handlers(app: FastAPI) -> None:
         logger.exception(
             "unhandled_exception", extra={"path": request.url.path}
         )
+        if _is_tool_request(request):
+            # Fail closed but keep the tool envelope; the model never
+            # receives a stack trace.
+            return JSONResponse(
+                status_code=500,
+                content=_tool_payload(
+                    "internal_error", "An unexpected error occurred"
+                ),
+            )
         if get_settings().debug:
             raise exc
         return JSONResponse(

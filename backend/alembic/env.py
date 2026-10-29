@@ -14,6 +14,7 @@ from app.db.base import Base
 from app import models  # noqa: F401  (register all tables on Base.metadata)
 from app.modules.voice import models as voice_models  # noqa: F401  (voice tables)
 from app.modules.recommendation_agent import models as recommendation_agent_models  # noqa: F401  (recommendation agent tables)
+from app.modules.recovery_workflow import models as recovery_workflow_models  # noqa: F401  (recovery workflow tables)
 
 config = context.config
 
