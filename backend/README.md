@@ -52,6 +52,23 @@ docs: `/docs`.
 | GET    | `/api/v1/agent/leads/{lead_id}` | Retrieve an agent-ready lead          |
 | GET    | `/api/v1/agent/leads/by-external/{external_crm_id}` | Find a lead by external CRM ID |
 
+### Voice agent — Bolna Agent Studio custom functions (Module 6)
+
+Called by the Bolna runtime with `Authorization: Bearer <token>`
+(`CALLORA_VOICE_TOOL_SECRET`, or a business API key). Every response uses
+the tool envelope `{"success", "message"|"error": {"code", "message"}}`.
+Details in `docs/voice-agent.md` § 5.9.
+
+| Method | Endpoint                                    | Purpose                                   |
+|--------|---------------------------------------------|-------------------------------------------|
+| POST   | `/api/v1/voice/tools/lead-details`          | Retrieve the lead the conversation is with |
+| POST   | `/api/v1/voice/tools/save-outcome`          | Persist the call outcome (idempotent)     |
+| POST   | `/api/v1/voice/tools/qualify-lead`          | Deterministic rule-based qualification    |
+| POST   | `/api/v1/voice/tools/create-opportunity`    | Open an opportunity for a qualified lead  |
+| POST   | `/api/v1/voice/tools/schedule-callback`     | Record a consent/DND/window-checked callback |
+| POST   | `/api/v1/voice/tools/crm-sync`              | Push the lead to the connected CRM        |
+| GET    | `/api/v1/voice/bolna/custom-functions`      | Bolna Agent Studio definitions (no secret served) |
+
 ### Authentication
 
 Every endpoint requires an `X-API-Key` header identifying the business.

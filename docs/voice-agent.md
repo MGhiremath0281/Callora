@@ -28,6 +28,7 @@ frontend in this milestone.
    - [5.6 Follow-up Q&A and Business Knowledge Base](#56-follow-up-qa-and-business-knowledge-base)
    - [5.7 Bolna Live Custom Tool Integration](#57-bolna-live-custom-tool-integration)
    - [5.8 Conversation Memory & AI Guardrails](#58-conversation-memory--ai-guardrails)
+   - [5.9 Bolna Agent Studio Custom Functions](#59-bolna-agent-studio-custom-functions)
 6. [The post-call workflow](#6-the-post-call-workflow)
 7. [Enabling real calling](#7-enabling-real-calling)
 8. [Provider costs and risks](#8-provider-costs-and-risks)
@@ -844,6 +845,146 @@ Tracks live state in PostgreSQL:
 - **Missing / Unsupported Knowledge Fallback**: Questions outside verified knowledge trigger graceful fallback acknowledgment and offer a warm transfer or priority callback.
 - **Immediate Opt-Out / Refusal**: Requests such as *"Stop calling me"*, *"Remove my number"*, or *"I am on DND"* immediately register business DND, flag `do_not_call: true`, and terminate outreach.
 - **Voice Speech Formatting**: Strips markdown, asterisks, bullets, headers, and URLs, and formats responses concisely (1–3 sentences) for natural telephone text-to-speech synthesis.
+
+### 5.9 Bolna Agent Studio Custom Functions
+
+Six live, mid-call tools the voice agent (Tanu) can invoke during a conversation.
+They **extend** the platform — every one of them is implemented on the existing
+Callora components (canonical leads, the voice repository, the compliance gate,
+handoffs, the job queue, the CRM sync service). None of them duplicates an
+existing module, and none lets the language model issue an arbitrary database
+update.
+
+#### Endpoint definitions: `GET /api/v1/voice/bolna/custom-functions`
+
+Returns the ready-to-paste Bolna Agent Studio definitions of all six functions
+(OpenAI-style function schema + `key: "custom_task"` + `value.{method,url,param,api_token,headers}`
+with `%(param)s` specifiers). Bolna POSTs the collected parameters as a JSON
+body and hands the raw JSON response back to the LLM. The `api_token` value in
+the definitions is a **placeholder** — the real secret is never served over HTTP.
+
+#### Authentication
+
+* `Authorization: Bearer <token>` (Bolna's `value.api_token` arrives as this
+  header). A token matching **`CALLORA_VOICE_TOOL_SECRET`** identifies the Bolna
+  runtime; a token matching a **business API key** (`CALLORA_API_KEYS`) resolves
+  to that business directly and additionally unlocks `force` on opportunity
+  creation.
+* With the shared tool secret, `business_id` in the body is required and is
+  *verified*, never trusted. A persisted provider execution id resolves the
+  stored call, whose business is authoritative — a mismatch is a 403.
+* The integration is **off** unless `CALLORA_VOICE_TOOL_SECRET` is set: every
+  tool request is rejected with 401 and the application runs normally.
+
+#### Response envelope (every response, success or failure)
+
+```json
+{"success": true,  "message": "...", "data": {...}}
+{"success": false, "error": {"code": "MACHINE_READABLE", "message": "..."}}
+```
+
+No stack traces, SQL text or configuration values are ever included.
+
+#### Common parameters
+
+Every request may carry `execution_id` (Bolna auto-injects) and `call_id`;
+`business_id` is required with the shared secret and must match the token.
+
+#### Conversation sequence
+
+```
+1. get_lead_details        — start of the conversation
+2. (ask the qualification questions)
+3. qualify_lead            — once the required answers exist
+4. save_call_outcome       — near the end, once the outcome is clear
+   (may embed the callback; or:)
+   schedule_callback       — when the customer asked for a specific time
+5. create_opportunity      — only after qualify_lead returned "qualified"
+6. sync_lead_to_crm        — once, at the very end (if a CRM is connected)
+```
+
+#### 1. `get_lead_details` — `POST /api/v1/voice/tools/lead-details`
+
+| | |
+|---|---|
+| Purpose | Retrieve the lead the conversation belongs to: name, preferred language, current status, known qualification answers, previous outcome. |
+| Params | `lead_id` (required, string), `execution_id`, `call_id`, `business_id` (required with the tool secret). |
+| Tanu invokes | At the start of a conversation, or to confirm what was already settled before asking again. |
+| Tanu must not invoke | For lead ids a customer mentioned that belong to somebody else, or repeatedly during the same call. |
+| Example response | `{"success": true, "message": "Lead details retrieved", "data": {"lead_id": "lead_voice_0001", "name": "Rahul Sharma", "status": "new", "known_fields": {"budget": "5000000"}}}` |
+
+#### 2. `save_call_outcome` — `POST /api/v1/voice/tools/save-outcome`
+
+| | |
+|---|---|
+| Purpose | Persist what the conversation established: the outcome, the answers actually given, a short summary and an optional callback request — transactionally and idempotently. |
+| Params | `lead_id` (required), `outcome` (required; one of `interested`, `not_interested`, `callback_requested`, `qualified`, `unqualified`, `no_answer`, `busy`, `failed`), `customer_interest`, `qualification_answers` (object — only what the customer actually said), `summary`, `callback_requested`, `callback_time` (ISO-8601; naive times are interpreted in `callback_timezone`), `callback_timezone`, `callback_reason`. |
+| Rules enforced | `qualified` only applies when the rule engine agrees (otherwise falls back to `interested`); status never moves backwards (every suppression is audited); a callback that fails consent/DND/calling-hours does not abort the outcome — it is reported inside `data.callback.error`. |
+| Tanu invokes | Exactly once, near the end of the conversation, once the outcome is clear. |
+| Tanu must not invoke | Speculatively mid-call, repeatedly with different outcomes for the same conversation, or with invented answer values. |
+| Example response | `{"success": true, "message": "Lead outcome saved successfully", "data": {"lead_id": "lead_voice_0001", "outcome": "interested", "lead_status": "interested", "lead_status_applied": true}}` |
+
+#### 3. `qualify_lead` — `POST /api/v1/voice/tools/qualify-lead`
+
+| | |
+|---|---|
+| Purpose | Evaluate the collected answers against the business's configured `qualification_questions` rules and return a deterministic verdict. |
+| Params | `lead_id` (required), `answers` (object keyed by question key; omit unanswered questions), `execution_id`, `call_id`, `business_id`. |
+| Rule keys (per question) | `min_value` / `max_value` (numeric), `matches_any` (case-insensitive substring), `allowed_values` (exact choice). A required unanswered question yields `insufficient_data` — unknowns are never fabricated. |
+| Tanu invokes | Once all required questions are answered, or to check what is still missing. |
+| Tanu must not invoke | To force a "qualified" verdict — the engine, not the model, decides. |
+| Example response | `{"success": true, "message": "Qualification evaluated: qualified", "data": {"lead_id": "lead_voice_0001", "qualification": {"status": "qualified", "score": 1.0}, "lead_status": "qualified"}}` |
+
+#### 4. `create_opportunity` — `POST /api/v1/voice/tools/create-opportunity`
+
+| | |
+|---|---|
+| Purpose | Open a sales opportunity (`voice_opportunities`) for the lead, storing the qualification result that justified it. |
+| Params | `lead_id` (required), `answers`, `execution_id`, `call_id`, `business_id`, `force` (only honoured for a business API key, never the shared Bolna token). |
+| Tanu invokes | Only after `qualify_lead` returned `qualified` **and** the customer confirmed they want to proceed. Repeated calls replay the existing opportunity. |
+| Tanu must not invoke | For unqualified or `insufficient_data` leads — the endpoint answers `QUALIFICATION_NOT_MET` and no opportunity is created. |
+| Example response | `{"success": true, "message": "Opportunity created successfully", "data": {"lead_id": "lead_voice_0001", "opportunity_id": "vopp_...", "status": "open", "created": true, "lead_status": "opportunity_created"}}` |
+
+#### 5. `schedule_callback` — `POST /api/v1/voice/tools/schedule-callback`
+
+| | |
+|---|---|
+| Purpose | Record a callback the customer explicitly asked for, at the time and in the timezone they named. Stored in UTC; a naive `requested_at` is interpreted *in* `timezone`, an offset-carrying time is absolute. |
+| Params | `lead_id` (required), `requested_at` (required, ISO-8601), `timezone` (required, IANA name), `reason`, `execution_id`, `call_id`, `business_id`. |
+| Checks | Consent, DND and the business calling window are evaluated **at the requested moment** (via `evaluate_callback_request`). Violations answer 403 (`CONSENT_NOT_GRANTED` / `DND_RESTRICTED`) or 422 (`callback_outside_calling_hours`, invalid time/timezone). |
+| Dispatch | With `CALLORA_VOICE_AUTO_CALLBACK_DISPATCH=true` the callback enqueues a `callback.dispatch` job that re-runs the full compliance gate before dialing. Default off: the handoff stays for the team (`dispatch.mode = "pending_manual"`). |
+| Tanu invokes | When the customer wants to continue at a specific later time — repeat the time back to them before confirming. |
+| Tanu must not invoke | To promise a callback the customer did not ask for, or for times outside what the customer actually said. |
+| Example response | `{"success": true, "message": "Callback scheduled successfully", "data": {"scheduled": true, "callback_id": "ho_...", "requested_at": "2026-10-29T06:30:00+00:00", "timezone": "Asia/Kolkata", "dispatch": {"mode": "pending_manual"}}}` |
+
+#### 6. `sync_lead_to_crm` — `POST /api/v1/voice/tools/crm-sync`
+
+| | |
+|---|---|
+| Purpose | Push the lead and its latest outcome to the business's connected CRM (reuses `CRMSyncService.sync_lead`). |
+| Params | `lead_id` (required), `connection_id` (defaults to `default`), `execution_id`, `call_id`, `business_id`. |
+| Honesty | Success is only reported when the external CRM confirmed (`created`/`updated`); with no active connection the endpoint answers 409 `CRM_NOT_CONFIGURED`; a provider failure answers 502 `CRM_SYNC_FAILED` — never a fake success. |
+| Tanu invokes | Once, at the very end of a productive conversation (after `save_call_outcome`). |
+| Tanu must not invoke | For conversations with no outcome, repeatedly, or when the customer did not consent to the interaction. |
+| Example response | `{"success": true, "message": "Lead created in the external CRM.", "data": {"lead_id": "lead_voice_0001", "sync_id": "...", "status": "created", "external_crm_id": "CRM-TEST-001", "connection_id": "default"}}` |
+
+#### Live outcome vs final call status (webhook reconciliation)
+
+The post-call workflow preserves a **live** outcome recorded by the custom
+functions: fields the live conversation established (`disposition`, `summary`,
+qualification data — marked `field_confidence.source = "live_conversation"`)
+are never overwritten by the later LLM pass. A disagreement is audited with
+action `outcome.conflict` and the verified live outcome wins.
+
+#### Deployment notes
+
+* The endpoints must be reachable by Bolna over **HTTPS** with a valid
+  certificate; the URLs are derived from the deployment's public base URL.
+* Set `value.api_token` in each Bolna tool configuration to
+  `Bearer <CALLORA_VOICE_TOOL_SECRET>`; fill `%(business_id)s` with the
+  business's literal Callora business id (Bolna does not inject it).
+* Rate limiting defaults to 120 requests/minute per business (accelerator
+  only; an unreachable Redis never blocks a request).
 
 ---
 
